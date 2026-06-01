@@ -161,6 +161,7 @@ export function ChatPanel() {
               apiKey: activeProvider.apiKey,
               type: activeProvider.type,
               headers: activeProvider.headers,
+              apiFormat: activeProvider.apiFormat,
             }
           : undefined
 
