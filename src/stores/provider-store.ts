@@ -17,6 +17,43 @@ export interface ProviderConfig {
   description?: string
 }
 
+export const FCC_PROXY_MODELS = [
+  'nvidia_nim/nvidia/nemotron-3-super-120b-a12b',
+  'nvidia_nim/z-ai/glm5.1',
+  'nvidia_nim/moonshotai/kimi-k2.5',
+  'nvidia_nim/minimaxai/minimax-m2.5',
+  'open_router/openrouter/free',
+  'open_router/anthropic/claude-sonnet-4',
+  'gemini/models/gemini-3.1-flash-lite',
+  'deepseek/deepseek-chat',
+  'mistral/devstral-small-latest',
+  'mistral/mistral-small-latest',
+  'mistral_codestral/codestral-latest',
+  'opencode/gpt-5.3-codex',
+  'opencode/claude-sonnet-4',
+  'opencode/deepseek-v4-flash-free',
+  'opencode/gemini-3-flash',
+  'opencode/big-pickle',
+  'opencode/glm-5.1',
+  'opencode_go/minimax-m2.7',
+  'wafer/DeepSeek-V4-Pro',
+  'wafer/MiniMax-M2.7',
+  'wafer/Qwen3.5-397B-A17B',
+  'wafer/GLM-5.1',
+  'kimi/kimi-k2.5',
+  'cerebras/llama3.1-8b',
+  'cerebras/gpt-oss-120b',
+  'groq/llama-3.3-70b-versatile',
+  'fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct',
+  'zai/glm-5.1',
+  'zai/glm-5-turbo',
+  'lmstudio/local-model',
+  'llamacpp/local-model',
+  'ollama/llama3.1',
+]
+
+export const FCC_DEFAULT_API_KEY = 'freecc'
+
 export const PRESET_PROVIDERS: Omit<ProviderConfig, 'id' | 'apiKey' | 'isActive'>[] = [
   // ─── Built-in ───
   {
@@ -32,26 +69,7 @@ export const PRESET_PROVIDERS: Omit<ProviderConfig, 'id' | 'apiKey' | 'isActive'
   {
     name: 'Free Claude Code (FCC Proxy)',
     baseUrl: 'http://localhost:8082',
-    models: [
-      'nvidia_nim/nvidia/nemotron-3-super-120b-a12b',
-      'nvidia_nim/z-ai/glm5.1',
-      'nvidia_nim/moonshotai/kimi-k2.5',
-      'open_router/openrouter/free',
-      'open_router/anthropic/claude-sonnet-4',
-      'gemini/models/gemini-3.1-flash-lite',
-      'deepseek/deepseek-chat',
-      'opencode/gpt-5.3-codex',
-      'opencode/claude-sonnet-4',
-      'opencode/deepseek-v4-flash-free',
-      'opencode_go/minimax-m2.7',
-      'wafer/DeepSeek-V4-Pro',
-      'kimi/kimi-k2.5',
-      'cerebras/gpt-oss-120b',
-      'groq/llama-3.3-70b-versatile',
-      'zai/glm-5.1',
-      'lmstudio/local-model',
-      'ollama/llama3.1',
-    ],
+    models: FCC_PROXY_MODELS,
     type: 'custom',
     icon: '🆓',
     apiFormat: 'anthropic',
@@ -221,6 +239,8 @@ interface ProviderState {
   providers: ProviderConfig[]
   activeProviderId: string
   selectedModel: string
+  isFetchingModels: Record<string, boolean>
+  fetchModelsError: Record<string, string | null>
 
   // Actions
   addProvider: (provider: Omit<ProviderConfig, 'id'>) => string
@@ -230,6 +250,7 @@ interface ProviderState {
   setSelectedModel: (model: string) => void
   getActiveProvider: () => ProviderConfig | undefined
   getAllModels: () => { providerId: string; providerName: string; model: string }[]
+  fetchModels: (providerId: string) => Promise<string[]>
 }
 
 const defaultProviders: ProviderConfig[] = [
@@ -248,7 +269,8 @@ const defaultProviders: ProviderConfig[] = [
   ...PRESET_PROVIDERS.filter((p) => p.type === 'custom').map((p, i) => ({
     ...p,
     id: `preset-${i}`,
-    apiKey: '',
+    // Set default API key for FCC proxy
+    apiKey: p.name === 'Free Claude Code (FCC Proxy)' ? FCC_DEFAULT_API_KEY : '',
     isActive: false,
   })),
 ]
@@ -259,6 +281,8 @@ export const useProviderStore = create<ProviderState>()(
       providers: defaultProviders,
       activeProviderId: 'builtin-zcode',
       selectedModel: 'glm-4-plus',
+      isFetchingModels: {},
+      fetchModelsError: {},
 
       addProvider: (provider) => {
         const id = `provider-${Date.now()}`
@@ -304,6 +328,65 @@ export const useProviderStore = create<ProviderState>()(
           }))
         )
       },
+
+      fetchModels: async (providerId: string) => {
+        const provider = get().providers.find((p) => p.id === providerId)
+        if (!provider || provider.type === 'builtin') return []
+
+        set((state) => ({
+          isFetchingModels: { ...state.isFetchingModels, [providerId]: true },
+          fetchModelsError: { ...state.fetchModelsError, [providerId]: null },
+        }))
+
+        try {
+          const response = await fetch('/api/models', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              baseUrl: provider.baseUrl,
+              apiKey: provider.apiKey,
+              apiFormat: provider.apiFormat || 'openai',
+            }),
+          })
+
+          const data = await response.json()
+
+          if (!response.ok || data.error) {
+            const errorMsg = data.error || `Failed to fetch models (HTTP ${response.status})`
+            set((state) => ({
+              isFetchingModels: { ...state.isFetchingModels, [providerId]: false },
+              fetchModelsError: { ...state.fetchModelsError, [providerId]: errorMsg },
+            }))
+            return []
+          }
+
+          const modelIds: string[] = (data.models || []).map((m: { id: string }) => m.id)
+
+          if (modelIds.length > 0) {
+            set((state) => ({
+              providers: state.providers.map((p) =>
+                p.id === providerId ? { ...p, models: modelIds } : p
+              ),
+              isFetchingModels: { ...state.isFetchingModels, [providerId]: false },
+              fetchModelsError: { ...state.fetchModelsError, [providerId]: null },
+            }))
+          } else {
+            set((state) => ({
+              isFetchingModels: { ...state.isFetchingModels, [providerId]: false },
+              fetchModelsError: { ...state.fetchModelsError, [providerId]: 'No models found. The provider may not support model discovery.' },
+            }))
+          }
+
+          return modelIds
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Failed to fetch models'
+          set((state) => ({
+            isFetchingModels: { ...state.isFetchingModels, [providerId]: false },
+            fetchModelsError: { ...state.fetchModelsError, [providerId]: message },
+          }))
+          return []
+        }
+      },
     }),
     {
       name: 'zcode-providers',
@@ -313,8 +396,8 @@ export const useProviderStore = create<ProviderState>()(
         activeProviderId: state.activeProviderId,
         selectedModel: state.selectedModel,
       }),
-      merge: (persistedState: Record<string, unknown>, currentState) => {
-        const ps = persistedState as Partial<ProviderState>
+      merge: (persistedState: unknown, currentState) => {
+        const ps = persistedState as Partial<ProviderState> & Record<string, unknown>
         if (ps.providers) {
           ps.providers = ps.providers.map((p) => ({
             ...p,

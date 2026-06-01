@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { useProviderStore, PRESET_PROVIDERS, type ProviderConfig, type ApiFormat } from '@/stores/provider-store'
+import { useProviderStore, PRESET_PROVIDERS, FCC_DEFAULT_API_KEY, type ProviderConfig, type ApiFormat } from '@/stores/provider-store'
 import {
   Dialog,
   DialogContent,
@@ -29,6 +29,11 @@ import {
   AccordionTrigger,
 } from '@/components/ui/accordion'
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import {
   Settings,
   Plus,
   Trash2,
@@ -41,11 +46,23 @@ import {
   Globe,
   Zap,
   ExternalLink,
+  RefreshCw,
+  ChevronDown,
+  Copy,
 } from 'lucide-react'
 
 export function SettingsDialog() {
-  const { providers, activeProviderId, addProvider, updateProvider, removeProvider, setActiveProvider } =
-    useProviderStore()
+  const {
+    providers,
+    activeProviderId,
+    isFetchingModels,
+    fetchModelsError,
+    addProvider,
+    updateProvider,
+    removeProvider,
+    setActiveProvider,
+    fetchModels,
+  } = useProviderStore()
   const [open, setOpen] = useState(false)
   const [showApiKeys, setShowApiKeys] = useState<Record<string, boolean>>({})
   const [newProvider, setNewProvider] = useState({
@@ -56,6 +73,8 @@ export function SettingsDialog() {
     apiFormat: 'openai' as ApiFormat,
   })
   const [showNewProvider, setShowNewProvider] = useState(false)
+  const [fccGuideOpen, setFccGuideOpen] = useState(false)
+  const [copiedCommand, setCopiedCommand] = useState<string | null>(null)
 
   const toggleApiKeyVisibility = useCallback((id: string) => {
     setShowApiKeys((prev) => ({ ...prev, [id]: !prev[id] }))
@@ -78,16 +97,59 @@ export function SettingsDialog() {
   }, [newProvider, addProvider])
 
   const [testingId, setTestingId] = useState<string | null>(null)
-  const [testResults, setTestResults] = useState<Record<string, boolean | null>>({})
+  const [testResults, setTestResults] = useState<Record<string, { success: boolean; message?: string } | null>>({})
 
   const handleTestConnection = useCallback(async (provider: ProviderConfig) => {
-    if (!provider.baseUrl || !provider.apiKey) return false
-    try {
-      const baseUrl = provider.baseUrl.replace(/\/$/, '')
-      const apiFormat = provider.apiFormat || 'openai'
+    if (!provider.baseUrl || !provider.apiKey) return { success: false, message: 'Base URL and API key are required' }
 
+    const baseUrl = provider.baseUrl.replace(/\/$/, '')
+    const apiFormat = provider.apiFormat || 'openai'
+
+    try {
       if (apiFormat === 'anthropic') {
-        // Test Anthropic-compatible endpoint
+        // For Anthropic format, try /v1/models first (simpler, cheaper, uses GET)
+        const modelHeaders: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'x-api-key': provider.apiKey,
+          'anthropic-version': '2023-06-01',
+          ...provider.headers,
+        }
+        if (!modelHeaders['Authorization']) {
+          modelHeaders['Authorization'] = `Bearer ${provider.apiKey}`
+        }
+
+        try {
+          const modelsRes = await fetch('/api/models', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              baseUrl: provider.baseUrl,
+              apiKey: provider.apiKey,
+              apiFormat: 'anthropic',
+            }),
+            signal: AbortSignal.timeout(15000),
+          })
+
+          if (modelsRes.ok) {
+            const modelsData = await modelsRes.json()
+            if (modelsData.models?.length > 0) {
+              return { success: true, message: `Connected! Found ${modelsData.models.length} model(s).` }
+            }
+            // Models endpoint worked but returned empty - still means connection is good
+            return { success: true, message: 'Connected! Models endpoint reachable.' }
+          }
+
+          // Models endpoint failed, try a minimal message request as fallback
+          const errorData = await modelsRes.json().catch(() => ({}))
+          // If it's an auth error, don't try the message endpoint
+          if (modelsRes.status === 401 || modelsRes.status === 403) {
+            return { success: false, message: (errorData as Record<string, string>).error || 'Authentication failed. Check your API key.' }
+          }
+        } catch {
+          // Models endpoint unreachable, fall through to message test
+        }
+
+        // Fallback: test with a minimal message request
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
           'x-api-key': provider.apiKey,
@@ -104,9 +166,12 @@ export function SettingsDialog() {
           }),
           signal: AbortSignal.timeout(15000),
         })
-        return res.ok || res.status === 400 // 400 might mean model issue but connection works
+        if (res.ok) return { success: true, message: 'Connected!' }
+        if (res.status === 400) return { success: true, message: 'Connected! (model may need adjustment)' }
+        const errText = await res.text().catch(() => '')
+        return { success: false, message: `Error (${res.status}): ${errText.slice(0, 100)}` }
       } else {
-        // Test OpenAI-compatible endpoint
+        // For OpenAI format, test /models endpoint
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${provider.apiKey}`,
@@ -116,11 +181,36 @@ export function SettingsDialog() {
           headers['HTTP-Referer'] = 'https://zcode.dev'
           headers['X-Title'] = 'ZCode'
         }
-        const res = await fetch(`${baseUrl}/models`, { headers, signal: AbortSignal.timeout(10000) })
-        return res.ok
+
+        // Use our models API for consistent behavior
+        const modelsRes = await fetch('/api/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            baseUrl: provider.baseUrl,
+            apiKey: provider.apiKey,
+            apiFormat: 'openai',
+          }),
+          signal: AbortSignal.timeout(15000),
+        })
+
+        if (modelsRes.ok) {
+          const modelsData = await modelsRes.json()
+          if (modelsData.models?.length > 0) {
+            return { success: true, message: `Connected! Found ${modelsData.models.length} model(s).` }
+          }
+          return { success: true, message: 'Connected! Models endpoint reachable.' }
+        }
+
+        const errorData = await modelsRes.json().catch(() => ({}))
+        return { success: false, message: errorData.error || `Failed (${modelsRes.status})` }
       }
-    } catch {
-      return false
+    } catch (err) {
+      const isFcc = provider.baseUrl.includes(':8082') || (provider.name || '').toLowerCase().includes('fcc')
+      if (isFcc) {
+        return { success: false, message: 'Cannot connect to FCC proxy. Make sure fcc-server is running.' }
+      }
+      return { success: false, message: err instanceof Error ? err.message : 'Connection failed' }
     }
   }, [])
 
@@ -129,11 +219,28 @@ export function SettingsDialog() {
       setTestingId(provider.id)
       setTestResults((prev) => ({ ...prev, [provider.id]: null }))
       const result = await handleTestConnection(provider)
-      setTestResults((prev) => ({ ...prev, [provider.id]: result ?? false }))
+      setTestResults((prev) => ({ ...prev, [provider.id]: result }))
       setTestingId(null)
     },
     [handleTestConnection]
   )
+
+  const onFetchModels = useCallback(
+    async (providerId: string) => {
+      await fetchModels(providerId)
+    },
+    [fetchModels]
+  )
+
+  const copyToClipboard = useCallback(async (text: string, id: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedCommand(id)
+      setTimeout(() => setCopiedCommand(null), 2000)
+    } catch {
+      // Fallback: ignore
+    }
+  }, [])
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -152,30 +259,123 @@ export function SettingsDialog() {
 
         <ScrollArea className="max-h-[70vh] px-6 pb-6">
           <div className="space-y-6">
-            {/* FCC Proxy Notice */}
-            <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-3">
+            {/* FCC Proxy Quick Setup */}
+            <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-4">
               <div className="flex items-start gap-2">
                 <Zap className="h-4 w-4 text-emerald-500 mt-0.5 flex-shrink-0" />
-                <div className="text-xs text-emerald-600 dark:text-emerald-400">
-                  <p className="font-semibold mb-1">Free Claude Code Proxy</p>
-                  <p className="mb-2">
-                    Use the <strong>Free Claude Code (FCC)</strong> proxy to access 17+ providers for free. Install it:
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-2">
+                    <p className="text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+                      Free Claude Code (FCC) Proxy
+                    </p>
+                    <Badge variant="outline" className="text-[10px] h-4 text-emerald-500 border-emerald-500/30">
+                      17+ Providers
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-emerald-600/80 dark:text-emerald-400/80 mb-3">
+                    Access 32+ models from NVIDIA NIM, OpenRouter, Gemini, DeepSeek, Mistral, OpenCode, Wafer, Kimi, Cerebras, Groq, Fireworks, Z.ai, LM Studio, llama.cpp, and Ollama — all through one local proxy.
                   </p>
-                  <code className="block bg-black/30 px-2 py-1 rounded text-[11px] mb-2 font-mono">
-                    curl -fsSL &quot;https://github.com/Alishahryar1/free-claude-code/blob/main/scripts/install.sh?raw=1&quot; | sh
-                  </code>
-                  <p className="mb-1">Then start the proxy:</p>
-                  <code className="block bg-black/30 px-2 py-1 rounded text-[11px] mb-2 font-mono">
-                    fcc-server
-                  </code>
-                  <p>
-                    Open Admin UI at <code className="bg-black/30 px-1 rounded">http://localhost:8082/admin</code>, set your API key, and select FCC Proxy in ZCode.
-                  </p>
+
+                  <Collapsible open={fccGuideOpen} onOpenChange={setFccGuideOpen}>
+                    <CollapsibleTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-xs text-emerald-600 dark:text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300 p-0"
+                      >
+                        {fccGuideOpen ? 'Hide' : 'Show'} Setup Guide
+                        <ChevronDown className={`h-3 w-3 ml-1 transition-transform ${fccGuideOpen ? 'rotate-180' : ''}`} />
+                      </Button>
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="mt-2 space-y-2">
+                      <div className="space-y-2 text-xs text-emerald-700 dark:text-emerald-300">
+                        <div className="flex items-start gap-2">
+                          <span className="font-bold text-emerald-500 min-w-[16px]">1</span>
+                          <div className="flex-1">
+                            <span className="font-medium">Install FCC proxy:</span>
+                            <div className="relative mt-1">
+                              <code className="block bg-black/30 px-2 py-1.5 rounded text-[11px] font-mono pr-8">
+                                curl -fsSL &quot;https://github.com/Alishahryar1/free-claude-code/blob/main/scripts/install.sh?raw=1&quot; | sh
+                              </code>
+                              <button
+                                onClick={() => copyToClipboard(
+                                  'curl -fsSL "https://github.com/Alishahryar1/free-claude-code/blob/main/scripts/install.sh?raw=1" | sh',
+                                  'install'
+                                )}
+                                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-black/20"
+                              >
+                                {copiedCommand === 'install' ? (
+                                  <Check className="h-3 w-3 text-emerald-300" />
+                                ) : (
+                                  <Copy className="h-3 w-3 text-emerald-400" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="font-bold text-emerald-500 min-w-[16px]">2</span>
+                          <div className="flex-1">
+                            <span className="font-medium">Start the proxy:</span>
+                            <div className="relative mt-1">
+                              <code className="block bg-black/30 px-2 py-1.5 rounded text-[11px] font-mono pr-8">
+                                fcc-server
+                              </code>
+                              <button
+                                onClick={() => copyToClipboard('fcc-server', 'start')}
+                                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-black/20"
+                              >
+                                {copiedCommand === 'start' ? (
+                                  <Check className="h-3 w-3 text-emerald-300" />
+                                ) : (
+                                  <Copy className="h-3 w-3 text-emerald-400" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="font-bold text-emerald-500 min-w-[16px]">3</span>
+                          <div className="flex-1">
+                            <span className="font-medium">Open Admin UI</span> and configure provider API keys:
+                            <div className="relative mt-1">
+                              <code className="block bg-black/30 px-2 py-1.5 rounded text-[11px] font-mono pr-8">
+                                http://localhost:8082/admin
+                              </code>
+                              <button
+                                onClick={() => copyToClipboard('http://localhost:8082/admin', 'admin')}
+                                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-black/20"
+                              >
+                                {copiedCommand === 'admin' ? (
+                                  <Check className="h-3 w-3 text-emerald-300" />
+                                ) : (
+                                  <Copy className="h-3 w-3 text-emerald-400" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="font-bold text-emerald-500 min-w-[16px]">4</span>
+                          <div className="flex-1">
+                            <span className="font-medium">In ZCode,</span> select <strong>FCC Proxy</strong> and enter auth token (default: <code className="bg-black/30 px-1 rounded">{FCC_DEFAULT_API_KEY}</code>)
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="font-bold text-emerald-500 min-w-[16px]">5</span>
+                          <div className="flex-1">
+                            <span className="font-medium">Click &quot;Fetch Models&quot;</span> in the FCC Proxy settings to discover available models
+                          </div>
+                        </div>
+                      </div>
+                    </CollapsibleContent>
+                  </Collapsible>
+
                   <a
                     href="https://github.com/Alishahryar1/free-claude-code"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 mt-1.5 text-emerald-500 hover:underline"
+                    className="inline-flex items-center gap-1 mt-2 text-xs text-emerald-500 hover:underline"
                   >
                     <ExternalLink className="h-3 w-3" />
                     View on GitHub
@@ -336,6 +536,13 @@ export function SettingsDialog() {
                                 placeholder="model-1, model-2"
                                 className="h-8 text-xs"
                               />
+                              {/* Fetch Models Error */}
+                              {fetchModelsError[provider.id] && (
+                                <div className="flex items-start gap-1.5 text-[11px] text-red-500 mt-1">
+                                  <AlertCircle className="h-3 w-3 flex-shrink-0 mt-0.5" />
+                                  <span>{fetchModelsError[provider.id]}</span>
+                                </div>
+                              )}
                             </div>
                           </>
                         )}
@@ -352,7 +559,7 @@ export function SettingsDialog() {
                         )}
 
                         {/* Actions */}
-                        <div className="flex items-center gap-2 pt-1">
+                        <div className="flex items-center gap-2 pt-1 flex-wrap">
                           {provider.type !== 'builtin' && (
                             <>
                               <Button
@@ -363,20 +570,33 @@ export function SettingsDialog() {
                                 disabled={testingId === provider.id || !provider.apiKey}
                               >
                                 {testingId === provider.id ? (
-                                  'Testing...'
-                                ) : testResults[provider.id] === true ? (
-                                  <>
-                                    <Check className="h-3 w-3 mr-1 text-emerald-500" />
-                                    Connected
-                                  </>
-                                ) : testResults[provider.id] === false ? (
-                                  <>
-                                    <AlertCircle className="h-3 w-3 mr-1 text-red-500" />
-                                    Failed
-                                  </>
+                                  <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
+                                ) : testResults[provider.id]?.success ? (
+                                  <Check className="h-3 w-3 mr-1 text-emerald-500" />
+                                ) : testResults[provider.id]?.success === false ? (
+                                  <AlertCircle className="h-3 w-3 mr-1 text-red-500" />
+                                ) : null}
+                                {testingId === provider.id
+                                  ? 'Testing...'
+                                  : testResults[provider.id]?.success
+                                  ? 'Connected'
+                                  : testResults[provider.id]?.success === false
+                                  ? 'Failed'
+                                  : 'Test Connection'}
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-7 text-xs"
+                                onClick={() => onFetchModels(provider.id)}
+                                disabled={isFetchingModels[provider.id] || !provider.apiKey}
+                              >
+                                {isFetchingModels[provider.id] ? (
+                                  <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
                                 ) : (
-                                  'Test Connection'
+                                  <RefreshCw className="h-3 w-3 mr-1" />
                                 )}
+                                {isFetchingModels[provider.id] ? 'Fetching...' : 'Fetch Models'}
                               </Button>
                               <Button
                                 variant="destructive"
@@ -401,6 +621,13 @@ export function SettingsDialog() {
                             </Button>
                           )}
                         </div>
+
+                        {/* Test result message */}
+                        {testResults[provider.id] && (
+                          <div className={`text-[11px] px-2 py-1.5 rounded ${testResults[provider.id]?.success ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-red-500/10 text-red-600 dark:text-red-400'}`}>
+                            {testResults[provider.id]?.message}
+                          </div>
+                        )}
                       </div>
                     </AccordionContent>
                   </AccordionItem>
@@ -520,7 +747,8 @@ export function SettingsDialog() {
                         addProvider({
                           name: preset.name,
                           baseUrl: preset.baseUrl,
-                          apiKey: '',
+                          // Pre-fill FCC proxy default key
+                          apiKey: preset.name === 'Free Claude Code (FCC Proxy)' ? FCC_DEFAULT_API_KEY : '',
                           models: preset.models,
                           isActive: false,
                           icon: preset.icon,

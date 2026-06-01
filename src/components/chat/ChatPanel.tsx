@@ -86,7 +86,7 @@ export function ChatPanel() {
       const toolRegex = /```tool\s*\n([\s\S]*?)```/g
       let match
       let newContent = content
-      const toolExecutions: Promise<string>[] = []
+      const toolExecutions: Promise<{ original: string; result: string }>[] = []
 
       while ((match = toolRegex.exec(content)) !== null) {
         try {

@@ -8,6 +8,18 @@ interface ChatMessageInput {
 
 type ApiFormat = 'openai' | 'anthropic' | 'builtin'
 
+/** Detect whether a provider is the Free Claude Code proxy */
+function isFccProxy(name: string | undefined, baseUrl: string | undefined): boolean {
+  const nameLower = (name || '').toLowerCase()
+  const urlLower = (baseUrl || '').toLowerCase()
+  return (
+    nameLower.includes('fcc') ||
+    nameLower.includes('free-claude') ||
+    nameLower.includes('free claude') ||
+    urlLower.includes(':8082')
+  )
+}
+
 export async function POST(request: NextRequest) {
   try {
     const {
@@ -127,7 +139,7 @@ async function handleBuiltinProvider(
 ) {
   const zai = await ZAI.create()
   const completion = await zai.chat.completions.create({
-    messages,
+    messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
     model: model || 'glm-4-plus',
     stream: true,
   })
@@ -162,8 +174,18 @@ async function handleBuiltinProvider(
 // ──────────────────────────────────────────
 // OpenAI Chat Completions format
 // ──────────────────────────────────────────
+interface ProviderInfo {
+  id: string
+  name: string
+  baseUrl: string
+  apiKey: string
+  type: 'builtin' | 'custom'
+  headers?: Record<string, string>
+  apiFormat?: ApiFormat
+}
+
 async function handleOpenAIProvider(
-  provider: NonNullable<Parameters<typeof POST>[0] extends { json: () => Promise<infer B> } ? B extends { provider?: infer P } ? P : never : never>,
+  provider: ProviderInfo,
   model: string,
   messages: { role: string; content: string }[]
 ) {
@@ -260,12 +282,13 @@ function proxyOpenAIStream(response: Response): Response {
 //          Wafer, Kimi/Moonshot, Fireworks, Z.ai
 // ──────────────────────────────────────────
 async function handleAnthropicProvider(
-  provider: NonNullable<Parameters<typeof POST>[0] extends { json: () => Promise<infer B> } ? B extends { provider?: infer P } ? P : never : never>,
+  provider: ProviderInfo,
   model: string,
   systemPrompt: string,
   messages: ChatMessageInput[]
 ) {
   const baseUrl = (provider.baseUrl || '').replace(/\/$/, '')
+  const fcc = isFccProxy(provider.name, baseUrl)
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -275,7 +298,7 @@ async function handleAnthropicProvider(
   }
 
   // For FCC proxy and other Anthropic proxies, also set Bearer auth
-  // since some proxies accept both formats
+  // since some proxies accept both formats. FCC proxy prefers x-api-key.
   if (!headers['Authorization']) {
     headers['Authorization'] = `Bearer ${provider.apiKey}`
   }
@@ -290,33 +313,94 @@ async function handleAnthropicProvider(
     }))
 
   // Determine the model to send
-  // For FCC proxy, strip the provider prefix (e.g., "nvidia_nim/model" -> "model")
-  // but keep the full slug for other Anthropic-compatible providers
-  let modelToUse = model
-  if (baseUrl.includes(':8082') || baseUrl.includes('free-claude') || provider.name?.toLowerCase().includes('fcc')) {
-    // FCC proxy expects the full slug with provider prefix
-    modelToUse = model
+  // FCC proxy expects the full slug with provider prefix (e.g., "nvidia_nim/model")
+  // Other Anthropic-compatible providers use the model name directly
+  const modelToUse = model
+
+  // Determine max tokens based on provider and model
+  // - FCC proxy routes to various models, some of which support very long outputs
+  // - Direct Anthropic Claude models: 8192 default, up to 32768 for extended
+  // - Other providers: 4096 conservative default
+  let maxTokens: number
+  if (fcc) {
+    // FCC proxy: use higher limit since it routes to various models
+    // that may support longer outputs
+    maxTokens = 16384
+  } else if (modelToUse.includes('claude')) {
+    // Direct Anthropic Claude models
+    maxTokens = 8192
+  } else {
+    // Other Anthropic-compatible providers
+    maxTokens = 4096
   }
 
-  // Determine max tokens - Anthropic requires this
-  const maxTokens = modelToUse.includes('claude') ? 8192 : 4096
+  // Build request body
+  const body: Record<string, unknown> = {
+    model: modelToUse,
+    max_tokens: maxTokens,
+    system: systemPrompt,
+    messages: anthropicMessages,
+    stream: true,
+  }
 
-  const response = await fetch(`${baseUrl}/v1/messages`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model: modelToUse,
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      messages: anthropicMessages,
-      stream: true,
-    }),
-  })
+  // Support thinking/extended thinking for Claude models via FCC or direct Anthropic
+  // This enables Claude's reasoning mode when the model supports it
+  if (modelToUse.includes('claude') && (fcc || baseUrl.includes('anthropic.com'))) {
+    body.thinking = {
+      type: 'enabled',
+      budget_tokens: Math.min(maxTokens, 10000),
+    }
+  }
+
+  let response: Response
+  try {
+    response = await fetch(`${baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    })
+  } catch (fetchError) {
+    // Handle connection errors (proxy not running, network issues, etc.)
+    const errMsg = fetchError instanceof Error ? fetchError.message : 'Unknown connection error'
+    if (fcc) {
+      return NextResponse.json(
+        {
+          error: `Cannot connect to FCC proxy at ${baseUrl}. Make sure fcc-server is running. Install it with: curl -fsSL "https://github.com/Alishahryar1/free-claude-code/blob/main/scripts/install.sh?raw=1" | sh — then run: fcc-server`,
+        },
+        { status: 502 }
+      )
+    }
+    return NextResponse.json(
+      { error: `Connection error: ${errMsg}. Check that the provider is accessible at ${baseUrl}.` },
+      { status: 502 }
+    )
+  }
 
   if (!response.ok) {
     const errorText = await response.text()
+    let errorMessage = `Anthropic API error (${response.status}): ${errorText}`
+
+    // Provide more helpful error messages for common FCC proxy issues
+    if (fcc) {
+      if (response.status === 401 || response.status === 403) {
+        errorMessage = `Authentication failed for FCC proxy. Check that your auth token is correct (default: "freecc"). Set it via ANTHROPIC_AUTH_TOKEN env var when starting fcc-server.`
+      } else if (response.status === 404) {
+        errorMessage = `FCC proxy returned 404. The model "${modelToUse}" may not be available. Check available models at http://localhost:8082/admin or try fetching models in Settings.`
+      } else if (response.status === 500 || response.status === 502 || response.status === 503) {
+        errorMessage = `FCC proxy server error (${response.status}). The upstream provider may be unavailable, or the API key for that provider may not be set. Open the admin UI at http://localhost:8082/admin to configure provider API keys.`
+      } else if (response.status === 429) {
+        errorMessage = `Rate limited by FCC proxy or upstream provider. Wait a moment and try again.`
+      }
+    } else {
+      if (response.status === 401 || response.status === 403) {
+        errorMessage = `Authentication failed. Check your API key for the ${provider.name || 'provider'}.`
+      } else if (response.status === 404) {
+        errorMessage = `Model "${modelToUse}" not found. Check that the model is available on this provider.`
+      }
+    }
+
     return NextResponse.json(
-      { error: `Anthropic API error (${response.status}): ${errorText}` },
+      { error: errorMessage },
       { status: response.status }
     )
   }
@@ -337,6 +421,8 @@ function proxyAnthropicStream(response: Response): Response {
         }
 
         let buffer = ''
+        let isInThinkingBlock = false
+
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
@@ -358,19 +444,53 @@ function proxyAnthropicStream(response: Response): Response {
               if (json.type === 'content_block_delta') {
                 const text = json.delta?.text
                 if (text) {
+                  // If we were in a thinking block, close it before outputting text
+                  if (isInThinkingBlock) {
+                    controller.enqueue(encoder.encode('\n</thinking>\n\n'))
+                    isInThinkingBlock = false
+                  }
                   controller.enqueue(encoder.encode(text))
                 }
+                // Handle thinking delta within content blocks
+                const thinking = json.delta?.thinking
+                if (thinking) {
+                  if (!isInThinkingBlock) {
+                    controller.enqueue(encoder.encode('<thinking>\n'))
+                    isInThinkingBlock = true
+                  }
+                  controller.enqueue(encoder.encode(thinking))
+                }
               }
-              // Also handle thinking blocks (for Claude reasoning)
+              // Handle thinking blocks (for Claude extended thinking)
               else if (json.type === 'thinking_delta') {
                 const thinking = json.delta?.thinking
                 if (thinking) {
+                  if (!isInThinkingBlock) {
+                    controller.enqueue(encoder.encode('<thinking>\n'))
+                    isInThinkingBlock = true
+                  }
                   controller.enqueue(encoder.encode(thinking))
+                }
+              }
+              // Handle content block start (may indicate thinking block)
+              else if (json.type === 'content_block_start') {
+                if (json.content_block?.type === 'thinking') {
+                  if (!isInThinkingBlock) {
+                    controller.enqueue(encoder.encode('<thinking>\n'))
+                    isInThinkingBlock = true
+                  }
+                } else if (json.content_block?.type === 'text' && isInThinkingBlock) {
+                  controller.enqueue(encoder.encode('\n</thinking>\n\n'))
+                  isInThinkingBlock = false
                 }
               }
               // Handle message_stop (end of stream)
               else if (json.type === 'message_stop') {
-                // Stream complete
+                // Close any open thinking block
+                if (isInThinkingBlock) {
+                  controller.enqueue(encoder.encode('\n</thinking>'))
+                  isInThinkingBlock = false
+                }
               }
               // Handle errors
               else if (json.type === 'error') {
@@ -381,6 +501,10 @@ function proxyAnthropicStream(response: Response): Response {
               // Skip non-JSON lines or malformed data
             }
           }
+        }
+        // Ensure thinking block is closed at end of stream
+        if (isInThinkingBlock) {
+          controller.enqueue(encoder.encode('\n</thinking>'))
         }
         controller.close()
       } catch (error) {

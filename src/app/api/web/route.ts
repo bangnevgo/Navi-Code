@@ -20,7 +20,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'scrape' && url) {
-      const pageContent = await zai.functions.invoke('web_scrape', {
+      const pageContent = await zai.functions.invoke('page_reader', {
         url,
       })
 

@@ -118,8 +118,8 @@ export async function POST(request: NextRequest) {
       }
 
       case 'web_scrape': {
-        const zai = await ZAI.create()
-        const content = await zai.functions.invoke('web_scrape', {
+        const zai2 = await ZAI.create()
+        const content = await zai2.functions.invoke('page_reader', {
           url: input.url,
         })
         return NextResponse.json({

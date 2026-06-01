@@ -13,23 +13,47 @@ Work Log:
 - Added API format detection: detectApiFormat() auto-detects Anthropic vs OpenAI based on provider name/URL
 - Updated provider-store.ts with:
   - New `apiFormat` field: 'openai' | 'anthropic' | 'builtin'
-  - Free Claude Code (FCC) proxy as preset with 18 models from all FCC providers
-  - All FCC-supported providers: NVIDIA NIM, OpenRouter, Gemini, DeepSeek, Mistral, OpenCode Zen/Go, Wafer, Kimi, Cerebras, Groq, Fireworks, Z.ai, LM Studio, Ollama
+  - Free Claude Code (FCC) proxy as preset with 32 models from all FCC providers
+  - All FCC-supported providers: NVIDIA NIM, OpenRouter, Gemini, DeepSeek, Mistral, OpenCode Zen/Go, Wafer, Kimi, Cerebras, Groq, Fireworks, Z.ai, LM Studio, llama.cpp, Ollama
   - Wafer, Kimi, Fireworks, Z.ai marked as Anthropic format providers
   - Descriptions for all providers
+  - FCC_DEFAULT_API_KEY = "freecc" as default auth token
+  - fetchModels() action for model discovery
+  - isFetchingModels/fetchModelsError state tracking
+- Updated /api/chat/route.ts with:
+  - ProviderInfo interface for proper typing
+  - isFccProxy() helper function
+  - Higher max_tokens for FCC (16384 vs 8192 for Anthropic direct)
+  - Thinking block support for Claude models via FCC
+  - FCC-specific error messages (proxy not running, auth failed, model not found, upstream errors, rate limits)
+  - Both x-api-key and Authorization headers for FCC compatibility
+- Created /api/models/route.ts - Model discovery API
+  - Fetches from provider's /v1/models (Anthropic) or /models (OpenAI) endpoint
+  - Normalizes response formats (array, {data:[...]}, {models:[...]})
+  - FCC-specific error messages
 - Updated SettingsDialog with:
   - API Format selector (OpenAI/Anthropic) per provider
-  - FCC proxy install instructions with terminal commands
-  - GitHub link to FCC repository
+  - FCC Quick Setup Guide (collapsible with step-by-step instructions and copy buttons)
+  - Fetch Models button for all providers
+  - Improved Test Connection using /api/models endpoint first
+  - FCC-specific error messages
   - Format badge indicators (A = Anthropic, default = OpenAI)
-  - Better test connection for Anthropic providers
-- Updated ChatPanel to send apiFormat in provider payload
-- FCC proxy requires Python 3.14+ (not available on this server), but ZCode is fully compatible
-- All lint checks pass, application compiles and runs
+  - GitHub link to FCC repository
+- Fixed TypeScript errors:
+  - chat/route.ts: ProviderInfo interface replacing complex conditional type
+  - SettingsDialog.tsx: modelsData undefined reference
+  - provider-store.ts: merge function type compatibility
+  - ChatPanel.tsx: tool execution Promise types
+  - tools/route.ts, web/route.ts: web_scrape -> page_reader SDK function name
+- Build successful, all API routes registered
 
 Stage Summary:
-- ZCode now fully supports the Free Claude Code proxy
+- ZCode fully supports the Free Claude Code proxy
 - Dual API format support: OpenAI Chat Completions + Anthropic Messages API
 - 20+ preset providers including all FCC-supported backends
+- 32 FCC proxy model slugs pre-configured
 - Auto-detection of API format based on provider name/URL
-- Settings UI includes FCC installation guide
+- Model discovery via /api/models endpoint
+- Collapsible FCC Setup Guide with copy-paste instructions
+- FCC-specific error messages for common issues
+- Application builds successfully
