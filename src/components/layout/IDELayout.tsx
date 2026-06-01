@@ -5,6 +5,8 @@ import { ChatPanel } from '@/components/chat/ChatPanel'
 import { FileExplorer } from '@/components/file-explorer/FileExplorer'
 import { CodeEditor } from '@/components/editor/CodeEditor'
 import { TerminalPanel } from '@/components/terminal/Terminal'
+import { SkillsPanel } from '@/components/skills/SkillsPanel'
+import { SettingsDialog } from '@/components/settings/SettingsDialog'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import {
@@ -19,47 +21,57 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   MessageSquare,
   Files,
   Settings,
   Terminal,
   Code2,
-  PanelLeftClose,
-  PanelLeftOpen,
-  ChevronDown,
   Sun,
   Moon,
   Sparkles,
   GitBranch,
-  Play,
+  Zap,
+  Key,
 } from 'lucide-react'
 import { useChatStore } from '@/stores/chat-store'
 import { useEditorStore } from '@/stores/editor-store'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-
-const AI_MODELS = [
-  { id: 'glm-4-plus', name: 'GLM-4 Plus', description: 'Most capable model' },
-  { id: 'glm-4-flash', name: 'GLM-4 Flash', description: 'Fastest responses' },
-  { id: 'glm-4-long', name: 'GLM-4 Long', description: 'Long context window' },
-]
+import { useProviderStore } from '@/stores/provider-store'
 
 export function IDELayout() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [activeSidebarTab, setActiveSidebarTab] = useState<'files' | 'chat-history'>('files')
+  const [activeSidebarTab, setActiveSidebarTab] = useState<'files' | 'chat-history' | 'skills'>('files')
   const [isDark, setIsDark] = useState(true)
   const { selectedModel, setSelectedModel } = useChatStore()
   const { showTerminal, toggleTerminal, showEditor } = useEditorStore()
+  const { providers, activeProviderId, setActiveProvider, getActiveProvider, getAllModels } = useProviderStore()
 
   const toggleTheme = useCallback(() => {
     setIsDark((prev) => !prev)
     document.documentElement.classList.toggle('dark')
   }, [])
+
+  const activeProvider = getActiveProvider()
+  const allModels = getAllModels()
+
+  // Group models by provider for the dropdown
+  const modelsByProvider = providers.reduce<Record<string, { provider: typeof providers[0]; models: string[] }>>(
+    (acc, p) => {
+      if (p.apiKey || p.type === 'builtin') {
+        acc[p.id] = { provider: p, models: p.models }
+      }
+      return acc
+    },
+    {}
+  )
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -88,25 +100,62 @@ export function IDELayout() {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Model Selector */}
-            <Select value={selectedModel} onValueChange={setSelectedModel}>
-              <SelectTrigger className="h-7 text-xs w-[150px] bg-muted/50 border-transparent">
-                <Sparkles className="h-3 w-3 mr-1 text-primary" />
+            {/* Model Selector - grouped by provider */}
+            <Select
+              value={`${activeProviderId}::${selectedModel}`}
+              onValueChange={(val) => {
+                const [providerId, model] = val.split('::')
+                setActiveProvider(providerId)
+                setSelectedModel(model)
+              }}
+            >
+              <SelectTrigger className="h-7 text-xs w-[200px] bg-muted/50 border-transparent">
+                <div className="flex items-center gap-1">
+                  {activeProvider?.icon && (
+                    <span className="text-xs">{activeProvider.icon}</span>
+                  )}
+                  <Sparkles className="h-3 w-3 text-primary" />
+                </div>
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
-                {AI_MODELS.map((model) => (
-                  <SelectItem key={model.id} value={model.id}>
-                    <div className="flex flex-col">
-                      <span>{model.name}</span>
-                      <span className="text-[10px] text-muted-foreground">{model.description}</span>
-                    </div>
-                  </SelectItem>
+              <SelectContent className="max-h-[300px]">
+                {Object.entries(modelsByProvider).map(([providerId, { provider, models }]) => (
+                  <SelectGroup key={providerId}>
+                    <SelectLabel className="text-[10px] text-muted-foreground">
+                      {provider.icon} {provider.name}
+                    </SelectLabel>
+                    {models.map((model) => (
+                      <SelectItem key={`${providerId}::${model}`} value={`${providerId}::${model}`} className="text-xs">
+                        {model}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
                 ))}
               </SelectContent>
             </Select>
 
+            {/* Provider status indicator */}
+            {activeProvider && activeProvider.type !== 'builtin' && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="flex items-center gap-1">
+                    {activeProvider.apiKey ? (
+                      <Key className="h-3 w-3 text-emerald-500" />
+                    ) : (
+                      <Key className="h-3 w-3 text-red-400" />
+                    )}
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {activeProvider.apiKey ? 'API key configured' : 'No API key set - click Settings'}
+                </TooltipContent>
+              </Tooltip>
+            )}
+
             <Separator orientation="vertical" className="h-4" />
+
+            {/* Settings */}
+            <SettingsDialog />
 
             {/* Theme Toggle */}
             <Tooltip>
@@ -166,6 +215,27 @@ export function IDELayout() {
               <TooltipContent side="right">Chat History</TooltipContent>
             </Tooltip>
 
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={`h-8 w-8 ${activeSidebarTab === 'skills' && sidebarOpen ? 'bg-accent text-accent-foreground border-l-2 border-primary' : ''}`}
+                  onClick={() => {
+                    if (activeSidebarTab === 'skills' && sidebarOpen) {
+                      setSidebarOpen(false)
+                    } else {
+                      setActiveSidebarTab('skills')
+                      setSidebarOpen(true)
+                    }
+                  }}
+                >
+                  <Zap className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right">Agent Skills</TooltipContent>
+            </Tooltip>
+
             <div className="flex-1" />
 
             <Tooltip>
@@ -186,6 +256,8 @@ export function IDELayout() {
                 <ResizablePanel defaultSize={20} minSize={15} maxSize={35}>
                   {activeSidebarTab === 'files' ? (
                     <FileExplorer />
+                  ) : activeSidebarTab === 'skills' ? (
+                    <SkillsPanel />
                   ) : (
                     <ChatHistory />
                   )}
@@ -233,7 +305,12 @@ export function IDELayout() {
             <span>0 errors, 0 warnings</span>
           </div>
           <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1">
+              {activeProvider?.icon} {activeProvider?.name || 'ZCode'}
+            </span>
+            <Separator orientation="vertical" className="h-2.5 bg-primary-foreground/30" />
             <span>{selectedModel}</span>
+            <Separator orientation="vertical" className="h-2.5 bg-primary-foreground/30" />
             <span>UTF-8</span>
             <span>TypeScript</span>
           </div>

@@ -1,25 +1,23 @@
 ---
-Task ID: 1
+Task ID: 2
 Agent: Main Agent
-Task: Build ZCode - AI Coding Assistant combining Claude Code, Codex, and OpenCode features
+Task: Add universal API provider setup, agent skills, and local computer access to ZCode
 
 Work Log:
-- Analyzed requirements: combine features of Claude Code (AI chat + context), Codex (code generation), and OpenCode (model selection + open architecture)
-- Initialized fullstack Next.js project with fullstack-dev skill
-- Created Zustand stores: chat-store.ts, editor-store.ts, file-store.ts
-- Created API route: /api/chat with streaming AI response using z-ai-web-dev-sdk
-- Built IDE Layout with resizable panels (activity bar, sidebar, chat, editor, terminal)
-- Built Chat Panel with streaming AI responses, markdown rendering, code block extraction
-- Built File Explorer with tree view, search, folder expand/collapse, file icons by type
-- Built Code Editor with syntax highlighting (react-syntax-highlighter), edit mode, copy functionality
-- Built Terminal Panel with simulated command execution (help, ls, git status, etc.)
-- Added model selector (GLM-4 Plus, Flash, Long), theme toggle (dark/light)
-- Enhanced global CSS with custom IDE dark theme, custom scrollbars, resizable handles
-- Installed @types/react-syntax-highlighter for type safety
-- All lint checks pass, application renders successfully
+- Created provider-store.ts with universal provider configuration (OpenAI, NVIDIA, OpenRouter, Groq, Together, Anthropic, DeepSeek, Google Gemini, custom)
+- Created skill-store.ts with 13 agent skills across 5 categories (file, terminal, web, code, system)
+- Created API routes for local computer access: /api/fs (file operations), /api/terminal (command execution), /api/system (system info), /api/web (web search/scrape), /api/tools (unified tool execution)
+- Updated /api/chat route to support multiple providers with dynamic base URL and API key, OpenAI-compatible streaming
+- Created SettingsDialog component with provider management, API key configuration, test connection, custom provider support
+- Created SkillsPanel component with category grouping, enable/disable toggle, confirmation indicators
+- Updated ChatPanel to use provider store and execute tool calls from AI responses
+- Updated IDELayout with provider-aware model selector, settings button, skills tab in activity bar
+- API keys stored in localStorage with base64 encoding, security notice displayed
+- Tested all API endpoints successfully: /api/system, /api/fs, /api/terminal, /api/tools
 
 Stage Summary:
-- ZCode AI Coding Assistant is fully functional with IDE-like interface
-- Features: AI Chat, File Explorer, Code Editor, Terminal, Model Selector, Theme Toggle
-- Tech Stack: Next.js 16, TypeScript, Zustand, shadcn/ui, react-syntax-highlighter, z-ai-web-dev-sdk
-- File structure: 10+ component files, 3 stores, 1 API route
+- ZCode now supports 9+ preset AI providers + unlimited custom providers
+- 13 agent skills available for local computer access (file, terminal, web, system)
+- Full API backend for file read/write/list/delete, terminal execution, system info, web search
+- Tool execution integrated into AI chat - AI can invoke tools via JSON blocks
+- All configurations persisted in localStorage
