@@ -53,7 +53,7 @@ export function CodeEditor() {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Tab Bar */}
       <div className="flex items-center border-b bg-muted/30 overflow-x-auto">
         {openFiles.map((file) => (
@@ -86,7 +86,7 @@ export function CodeEditor() {
 
       {/* Editor Content */}
       {activeFile && (
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0">
           {/* Toolbar */}
           <div className="flex items-center justify-between px-3 py-1.5 border-b bg-muted/10">
             <div className="flex items-center gap-2">
@@ -145,7 +145,7 @@ export function CodeEditor() {
           </div>
 
           {/* Code */}
-          <ScrollArea className="flex-1">
+          <ScrollArea className="flex-1 min-h-0">
             {editingFileId === activeFile.id ? (
               <div className="p-4">
                 <Textarea
@@ -165,6 +165,7 @@ export function CodeEditor() {
                 language={activeFile.language || 'text'}
                 style={oneDark}
                 showLineNumbers
+                wrapLongLines={true}
                 customStyle={{
                   margin: 0,
                   padding: '16px',
@@ -172,6 +173,8 @@ export function CodeEditor() {
                   lineHeight: '1.6',
                   background: '#1e1e2e',
                   minHeight: '100%',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
                 }}
                 lineNumberStyle={{
                   minWidth: '3em',

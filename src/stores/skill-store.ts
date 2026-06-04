@@ -142,6 +142,24 @@ export const AVAILABLE_SKILLS: AgentSkill[] = [
     requiresConfirmation: true,
     apiEndpoint: '/api/terminal/exec',
   },
+  {
+    id: 'ask-question',
+    name: 'Ask Question',
+    description: 'Ask the user a clarifying question or request feedback',
+    icon: '❓',
+    category: 'system',
+    enabled: true,
+    requiresConfirmation: false,
+  },
+  {
+    id: 'start-subagent',
+    name: 'Start Subagent',
+    description: 'Spawn a specialized subagent to perform a subtask',
+    icon: '🤖',
+    category: 'system',
+    enabled: true,
+    requiresConfirmation: true,
+  },
 ]
 
 interface SkillState {
@@ -152,7 +170,7 @@ interface SkillState {
   toggleSkill: (id: string) => void
   enableAllSkills: () => void
   disableAllSkills: () => void
-  addSkillCall: (call: Omit<SkillCall, 'id' | 'timestamp'>) => void
+  addSkillCall: (call: Omit<SkillCall, 'id' | 'timestamp'>) => string
   updateSkillCall: (id: string, updates: Partial<SkillCall>) => void
   clearSkillCalls: () => void
   getEnabledSkills: () => AgentSkill[]
@@ -190,13 +208,16 @@ export const useSkillStore = create<SkillState>()(
           skills: state.skills.map((s) => ({ ...s, enabled: false })),
         })),
 
-      addSkillCall: (call) =>
+      addSkillCall: (call) => {
+        const id = `call-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`
         set((state) => ({
           activeSkillCalls: [
             ...state.activeSkillCalls,
-            { ...call, id: `call-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`, timestamp: Date.now() },
+            { ...call, id, timestamp: Date.now() },
           ],
-        })),
+        }))
+        return id
+      },
 
       updateSkillCall: (id, updates) =>
         set((state) => ({
@@ -208,7 +229,7 @@ export const useSkillStore = create<SkillState>()(
       getEnabledSkills: () => get().skills.filter((s) => s.enabled),
     }),
     {
-      name: 'zcode-skills',
+      name: 'navicode-skills',
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         skills: state.skills.map((s) => ({ ...s, enabled: s.enabled })),

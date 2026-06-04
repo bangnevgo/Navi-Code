@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { FileExplorer } from '@/components/file-explorer/FileExplorer'
 import { CodeEditor } from '@/components/editor/CodeEditor'
@@ -9,6 +9,19 @@ import { SkillsPanel } from '@/components/skills/SkillsPanel'
 import { SettingsDialog } from '@/components/settings/SettingsDialog'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuCheckboxItem,
+  DropdownMenuTrigger,
+  DropdownMenuLabel,
+} from '@/components/ui/dropdown-menu'
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -41,37 +54,77 @@ import {
   GitBranch,
   Zap,
   Key,
+  FolderOpen,
+  FilePlus,
+  Save,
+  X,
+  RotateCcw,
+  Copy,
+  Scissors,
+  Clipboard,
+  Search,
+  Play,
+  Square,
+  ExternalLink,
+  Info,
+  Github,
+  Keyboard,
+  ChevronRight,
 } from 'lucide-react'
 import { useChatStore } from '@/stores/chat-store'
 import { useEditorStore } from '@/stores/editor-store'
 import { useProviderStore } from '@/stores/provider-store'
+import { useFileStore } from '@/stores/file-store'
 
 export function IDELayout() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [activeSidebarTab, setActiveSidebarTab] = useState<'files' | 'chat-history' | 'skills'>('files')
   const [isDark, setIsDark] = useState(true)
+  const [mounted, setMounted] = useState(false)
   const { selectedModel, setSelectedModel } = useChatStore()
-  const { showTerminal, toggleTerminal, showEditor } = useEditorStore()
+  const { showTerminal, toggleTerminal, showEditor, setCwd } = useEditorStore()
   const { providers, activeProviderId, setActiveProvider, getActiveProvider, getAllModels } = useProviderStore()
+
+  // Wait for client-side hydration before rendering persisted state
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setMounted(true)
+    }, 0)
+
+    // Fetch and initialize the workspace directory in the store
+    fetch('/api/terminal?action=cwd')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.cwd) {
+          setCwd(data.cwd)
+        }
+      })
+      .catch(() => {})
+
+    return () => clearTimeout(timer)
+  }, [setCwd])
 
   const toggleTheme = useCallback(() => {
     setIsDark((prev) => !prev)
     document.documentElement.classList.toggle('dark')
   }, [])
 
-  const activeProvider = getActiveProvider()
-  const allModels = getAllModels()
+  // Only compute provider-dependent values after mount to avoid hydration mismatch
+  const activeProvider = mounted ? getActiveProvider() : undefined
+  const allModels = mounted ? getAllModels() : []
 
   // Group models by provider for the dropdown
-  const modelsByProvider = providers.reduce<Record<string, { provider: typeof providers[0]; models: string[] }>>(
-    (acc, p) => {
-      if (p.apiKey || p.type === 'builtin') {
-        acc[p.id] = { provider: p, models: p.models }
-      }
-      return acc
-    },
-    {}
-  )
+  const modelsByProvider = mounted
+    ? providers.reduce<Record<string, { provider: typeof providers[0]; models: string[] }>>(
+        (acc, p) => {
+          if (p.apiKey || p.type === 'builtin') {
+            acc[p.id] = { provider: p, models: p.models }
+          }
+          return acc
+        },
+        {}
+      )
+    : {}
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -84,18 +137,291 @@ export function IDELayout() {
               <div className="w-6 h-6 rounded-md bg-primary flex items-center justify-center">
                 <Sparkles className="h-3.5 w-3.5 text-primary-foreground" />
               </div>
-              <span className="font-bold text-sm tracking-tight">ZCode</span>
+              <span className="font-bold text-sm tracking-tight">NaviCode</span>
             </div>
 
             <Separator orientation="vertical" className="h-4 mx-1" />
 
-            {/* Menu */}
+            {/* Menu Bar */}
             <div className="flex items-center gap-0.5 text-xs text-muted-foreground">
-              <button className="px-2 py-1 rounded hover:bg-accent transition-colors">File</button>
-              <button className="px-2 py-1 rounded hover:bg-accent transition-colors">Edit</button>
-              <button className="px-2 py-1 rounded hover:bg-accent transition-colors">View</button>
-              <button className="px-2 py-1 rounded hover:bg-accent transition-colors">Run</button>
-              <button className="px-2 py-1 rounded hover:bg-accent transition-colors">Help</button>
+              {/* FILE */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="px-2 py-1 rounded hover:bg-accent hover:text-foreground transition-colors">File</button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-56" align="start">
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">File</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={async () => {
+                    let folderPath = ''
+                    try {
+                      const res = await fetch('/api/fs?action=browse-folder')
+                      const data = await res.json()
+                      if (data.success && data.path) {
+                        folderPath = data.path
+                      }
+                    } catch {
+                      // Ignore and fallback
+                    }
+
+                    if (folderPath) {
+                      useFileStore.getState().setRootPath(folderPath)
+                      useEditorStore.getState().setCwd(folderPath)
+                      window.dispatchEvent(new CustomEvent('navicode-open-folder', { detail: folderPath }))
+                    } else {
+                      const path = window.prompt('Enter folder path manually:', useFileStore.getState().rootPath || '/Users/ding')
+                      if (path) {
+                        useFileStore.getState().setRootPath(path)
+                        useEditorStore.getState().setCwd(path)
+                        window.dispatchEvent(new CustomEvent('navicode-open-folder', { detail: path }))
+                      }
+                    }
+                  }}>
+                    <FolderOpen className="mr-2 h-3.5 w-3.5" />
+                    Open Folder...
+                    <DropdownMenuShortcut>⌘O</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => {
+                    const name = window.prompt('New file name:', 'untitled.ts')
+                    if (name) {
+                      useEditorStore.getState().openFile({ name, path: `/new/${name}`, content: '', language: 'typescript' })
+                    }
+                  }}>
+                    <FilePlus className="mr-2 h-3.5 w-3.5" />
+                    New File
+                    <DropdownMenuShortcut>⌘N</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => {
+                    const state = useEditorStore.getState()
+                    const activeFile = state.openFiles.find(f => f.id === state.activeFileId)
+                    if (!activeFile) return
+                    fetch('/api/fs', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ action: 'write', path: activeFile.path, content: activeFile.content }),
+                    }).then(() => {
+                      state.updateFileContent(activeFile.id, activeFile.content)
+                      window.dispatchEvent(new CustomEvent('navicode-saved', { detail: activeFile.path }))
+                    })
+                  }}>
+                    <Save className="mr-2 h-3.5 w-3.5" />
+                    Save
+                    <DropdownMenuShortcut>⌘S</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => {
+                    const state = useEditorStore.getState()
+                    const activeFile = state.openFiles.find(f => f.id === state.activeFileId)
+                    if (activeFile) state.closeFile(activeFile.id)
+                  }}>
+                    <X className="mr-2 h-3.5 w-3.5" />
+                    Close File
+                    <DropdownMenuShortcut>⌘W</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              {/* EDIT */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="px-2 py-1 rounded hover:bg-accent hover:text-foreground transition-colors">Edit</button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-56" align="start">
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">Edit</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => document.execCommand('copy')}>
+                    <Copy className="mr-2 h-3.5 w-3.5" />
+                    Copy
+                    <DropdownMenuShortcut>⌘C</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => document.execCommand('cut')}>
+                    <Scissors className="mr-2 h-3.5 w-3.5" />
+                    Cut
+                    <DropdownMenuShortcut>⌘X</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => document.execCommand('paste')}>
+                    <Clipboard className="mr-2 h-3.5 w-3.5" />
+                    Paste
+                    <DropdownMenuShortcut>⌘V</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => document.execCommand('selectAll')}>
+                    Select All
+                    <DropdownMenuShortcut>⌘A</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => document.execCommand('undo')}>
+                    <RotateCcw className="mr-2 h-3.5 w-3.5" />
+                    Undo
+                    <DropdownMenuShortcut>⌘Z</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              {/* VIEW */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="px-2 py-1 rounded hover:bg-accent hover:text-foreground transition-colors">View</button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-56" align="start">
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">View</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuCheckboxItem
+                    checked={sidebarOpen && activeSidebarTab === 'files'}
+                    onCheckedChange={() => {
+                      setActiveSidebarTab('files')
+                      setSidebarOpen(true)
+                    }}
+                  >
+                    <Files className="mr-2 h-3.5 w-3.5" />
+                    Explorer
+                    <DropdownMenuShortcut>⌘E</DropdownMenuShortcut>
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuCheckboxItem
+                    checked={showTerminal}
+                    onCheckedChange={toggleTerminal}
+                  >
+                    <Terminal className="mr-2 h-3.5 w-3.5" />
+                    Terminal
+                    <DropdownMenuShortcut>⌘`</DropdownMenuShortcut>
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuCheckboxItem
+                    checked={showEditor}
+                    onCheckedChange={(v) => useEditorStore.getState().setShowEditor(v)}
+                  >
+                    <Code2 className="mr-2 h-3.5 w-3.5" />
+                    Editor Panel
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuCheckboxItem
+                    checked={sidebarOpen && activeSidebarTab === 'chat-history'}
+                    onCheckedChange={() => {
+                      setActiveSidebarTab('chat-history')
+                      setSidebarOpen(true)
+                    }}
+                  >
+                    <MessageSquare className="mr-2 h-3.5 w-3.5" />
+                    Chat History
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuCheckboxItem
+                    checked={sidebarOpen && activeSidebarTab === 'skills'}
+                    onCheckedChange={() => {
+                      setActiveSidebarTab('skills')
+                      setSidebarOpen(true)
+                    }}
+                  >
+                    <Zap className="mr-2 h-3.5 w-3.5" />
+                    Agent Skills
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={toggleTheme}>
+                    {isDark ? <Sun className="mr-2 h-3.5 w-3.5" /> : <Moon className="mr-2 h-3.5 w-3.5" />}
+                    Toggle Theme
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              {/* RUN */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="px-2 py-1 rounded hover:bg-accent hover:text-foreground transition-colors">Run</button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-56" align="start">
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">Run</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => {
+                    if (!showTerminal) toggleTerminal()
+                    const state = useEditorStore.getState()
+                    const activeFile = state.openFiles.find(f => f.id === state.activeFileId)
+                    if (activeFile) {
+                      const ext = activeFile.name.split('.').pop()
+                      const cmds: Record<string, string> = {
+                        ts: `npx ts-node "${activeFile.path}"`,
+                        js: `node "${activeFile.path}"`,
+                        py: `python3 "${activeFile.path}"`,
+                        sh: `bash "${activeFile.path}"`,
+                      }
+                      const cmd = cmds[ext || ''] || `echo "Cannot run .${ext} files directly"`
+                      window.dispatchEvent(new CustomEvent('navicode-run-command', { detail: cmd }))
+                    } else {
+                      window.dispatchEvent(new CustomEvent('navicode-run-command', { detail: 'echo "No file open. Open a file first."' }))
+                    }
+                  }}>
+                    <Play className="mr-2 h-3.5 w-3.5" />
+                    Run Current File
+                    <DropdownMenuShortcut>⌘⏎</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => {
+                    if (!showTerminal) toggleTerminal()
+                    window.dispatchEvent(new CustomEvent('navicode-run-command', { detail: 'npm run dev' }))
+                  }}>
+                    <Play className="mr-2 h-3.5 w-3.5 text-emerald-500" />
+                    npm run dev
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => {
+                    if (!showTerminal) toggleTerminal()
+                    window.dispatchEvent(new CustomEvent('navicode-run-command', { detail: 'npm run build' }))
+                  }}>
+                    <Play className="mr-2 h-3.5 w-3.5 text-blue-500" />
+                    npm run build
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => {
+                    if (!showTerminal) toggleTerminal()
+                    window.dispatchEvent(new CustomEvent('navicode-run-command', { detail: 'npm test' }))
+                  }}>
+                    <Play className="mr-2 h-3.5 w-3.5 text-amber-500" />
+                    Run Tests
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => {
+                    if (!showTerminal) toggleTerminal()
+                  }}>
+                    <Terminal className="mr-2 h-3.5 w-3.5" />
+                    Open Terminal
+                    <DropdownMenuShortcut>⌘`</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              {/* HELP */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="px-2 py-1 rounded hover:bg-accent hover:text-foreground transition-colors">Help</button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="w-56" align="start">
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">Help</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => window.open('https://github.com', '_blank')}>
+                    <Github className="mr-2 h-3.5 w-3.5" />
+                    GitHub Repository
+                    <ExternalLink className="ml-auto h-3 w-3 opacity-50" />
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => {
+                    window.dispatchEvent(new CustomEvent('navicode-send', {
+                      detail: 'What can you help me with? Show me a quick overview of NaviCode features.'
+                    }))
+                  }}>
+                    <Sparkles className="mr-2 h-3.5 w-3.5" />
+                    Ask AI for Help
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => {
+                    window.dispatchEvent(new CustomEvent('navicode-send', {
+                      detail: 'Show me all available keyboard shortcuts for NaviCode.'
+                    }))
+                  }}>
+                    <Keyboard className="mr-2 h-3.5 w-3.5" />
+                    Keyboard Shortcuts
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem>
+                    <Info className="mr-2 h-3.5 w-3.5" />
+                    NaviCode v0.2.0
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
 
@@ -304,12 +630,12 @@ export function IDELayout() {
             </div>
             <span>0 errors, 0 warnings</span>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1">
-              {activeProvider?.icon} {activeProvider?.name || 'ZCode'}
+          <div className="flex items-center gap-3" suppressHydrationWarning>
+            <span className="flex items-center gap-1" suppressHydrationWarning>
+              {mounted && activeProvider?.icon} {mounted ? (activeProvider?.name || 'NaviCode') : 'NaviCode'}
             </span>
             <Separator orientation="vertical" className="h-2.5 bg-primary-foreground/30" />
-            <span>{selectedModel}</span>
+            <span suppressHydrationWarning>{mounted ? selectedModel : ''}</span>
             <Separator orientation="vertical" className="h-2.5 bg-primary-foreground/30" />
             <span>UTF-8</span>
             <span>TypeScript</span>

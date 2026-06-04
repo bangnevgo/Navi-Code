@@ -3,26 +3,44 @@ import { exec } from 'child_process'
 import { promisify } from 'util'
 import { readFile, writeFile, unlink, readdir, stat, mkdir } from 'fs/promises'
 import { join, resolve, dirname } from 'path'
+import { useEditorStore } from '@/stores/editor-store'
 import ZAI from 'z-ai-web-dev-sdk'
 
 const execAsync = promisify(exec)
-const PROJECT_ROOT = '/home/z/my-project'
+const PROJECT_ROOT = process.env.NAVICODE_ROOT || process.env.ZCODE_ROOT || process.cwd()
 
 function safePath(inputPath: string): string {
-  const resolved = resolve(PROJECT_ROOT, inputPath.startsWith('/') ? inputPath.slice(1) : inputPath)
-  if (!resolved.startsWith(PROJECT_ROOT)) {
-    throw new Error('Access denied: path outside project directory')
-  }
-  return resolved
+  if (!inputPath || inputPath === '.') return PROJECT_ROOT
+  if (inputPath.startsWith('/')) return resolve(inputPath)
+  return resolve(join(PROJECT_ROOT, inputPath))
+}
+
+// Determine base directory for relative operations, falling back to editor cwd
+function getBaseDir(input: any): string {
+  if (input?.cwd) return safePath(input.cwd)
+  // editor store may not be initialized in serverless context; fallback to PROJECT_ROOT
+  const storeCwd = (useEditorStore.getState() as any).getCwd?.()
+  return storeCwd ? safePath(storeCwd) : PROJECT_ROOT
+}
+
+function resolvePath(p: string | undefined, base: string): string {
+  if (!p) return base
+  if (p.startsWith('/')) return safePath(p)
+  return resolve(base, p)
 }
 
 export async function POST(request: NextRequest) {
   try {
     const { tool, input } = await request.json()
+    const normalizedTool = typeof tool === 'string' ? tool.replace(/-/g, '_') : tool
 
-    switch (tool) {
+    switch (normalizedTool) {
       case 'file_read': {
-        const filePath = safePath(input.path)
+        if (!input) {
+          return NextResponse.json({ success: false, error: 'Missing input object.' })
+        }
+        const base = getBaseDir(input)
+        const filePath = resolvePath(input.path, base)
         const content = await readFile(filePath, 'utf-8')
         const fileStat = await stat(filePath)
         return NextResponse.json({
@@ -34,7 +52,11 @@ export async function POST(request: NextRequest) {
       }
 
       case 'file_write': {
-        const filePath = safePath(input.path)
+        if (!input || typeof input.path !== 'string' || typeof input.content !== 'string') {
+          return NextResponse.json({ success: false, error: 'Missing or invalid "path" or "content" parameters (both must be strings).' })
+        }
+        const base = getBaseDir(input)
+        const filePath = resolvePath(input.path, base)
         await mkdir(dirname(filePath), { recursive: true })
         await writeFile(filePath, input.content, 'utf-8')
         return NextResponse.json({
@@ -45,22 +67,35 @@ export async function POST(request: NextRequest) {
       }
 
       case 'file_list': {
-        const dirPath = safePath(input.path || '.')
+        const base = getBaseDir(input)
+        const dirPath = resolvePath(input?.path, base)
         const entries = await readdir(dirPath, { withFileTypes: true })
-        const items = entries.map((entry) => ({
-          name: entry.name,
-          type: entry.isDirectory() ? 'directory' : 'file',
-          path: join(input.path || '.', entry.name),
-        }))
+        const items = entries
+          .filter((e) => !e.name.startsWith('.'))
+          .map((entry) => ({
+            name: entry.name,
+            type: entry.isDirectory() ? 'directory' : 'file',
+            path: join(dirPath, entry.name),
+          }))
+          .sort((a, b) => {
+            if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+            return a.name.localeCompare(b.name)
+          })
+        const formatted = items.map((i) => `${i.type === 'directory' ? '📁' : '📄'} ${i.name}`).join('\n')
         return NextResponse.json({
           tool: 'file_list',
           success: true,
-          output: JSON.stringify(items, null, 2),
+          output: `Contents of ${dirPath}:\n\n${formatted}`,
+          items,
         })
       }
 
       case 'file_delete': {
-        const filePath = safePath(input.path)
+        if (!input || typeof input.path !== 'string') {
+          return NextResponse.json({ success: false, error: 'Missing or invalid "path" parameter (must be a string).' })
+        }
+        const base = getBaseDir(input)
+        const filePath = resolvePath(input.path, base)
         await unlink(filePath)
         return NextResponse.json({
           tool: 'file_delete',
@@ -70,63 +105,129 @@ export async function POST(request: NextRequest) {
       }
 
       case 'file_search': {
-        const searchDir = safePath(input.path || '.')
-        const { stdout } = await execAsync(
-          `rg --json -l "${input.query.replace(/"/g, '\\"')}" ${searchDir} 2>/dev/null || true`,
-          { timeout: 15000 }
-        )
-        const results = stdout
-          .split('\n')
-          .filter((l) => l.trim())
-          .map((l) => {
-            try { return JSON.parse(l) } catch { return null }
+        if (!input || typeof input.query !== 'string') {
+          return NextResponse.json({ success: false, error: 'Missing or invalid "query" parameter (must be a string).' })
+        }
+        const base = getBaseDir(input)
+        const searchDir = resolvePath(input.path, base)
+        const query = (input.query || '').replace(/"/g, '\\"')
+        try {
+          // Try grep first (available on all Mac)
+          const { stdout } = await execAsync(
+            `grep -r "${query}" "${searchDir}" -l --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.py" --include="*.md" --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.next 2>/dev/null | head -20`,
+            { timeout: 15000 }
+          )
+          const fileMatches = stdout.trim()
+          // Also search by filename or directory name
+          const { stdout: nameOut } = await execAsync(
+            `find "${searchDir}" -name "*${query}*" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/.next/*" 2>/dev/null | head -20`,
+            { timeout: 10000 }
+          )
+          const nameMatches = nameOut.trim()
+          const allResults = [...new Set([...fileMatches.split('\n'), ...nameMatches.split('\n')].filter(Boolean))].join('\n')
+          return NextResponse.json({
+            tool: 'file_search',
+            success: true,
+            output: allResults ? `Search results for "${input.query}":\n${allResults}` : `No files found matching "${input.query}"`,
           })
-          .filter(Boolean)
-          .slice(0, 50)
-        return NextResponse.json({
-          tool: 'file_search',
-          success: true,
-          output: JSON.stringify(results, null, 2),
-        })
+        } catch {
+          return NextResponse.json({
+            tool: 'file_search',
+            success: false,
+            output: '',
+            error: 'Search failed',
+          })
+        }
       }
 
       case 'terminal_exec': {
-        const { stdout, stderr } = await execAsync(input.command, {
-          cwd: input.cwd || PROJECT_ROOT,
-          timeout: 30000,
-          maxBuffer: 1024 * 1024 * 10,
-        })
-        return NextResponse.json({
-          tool: 'terminal_exec',
-          success: true,
-          output: stdout.toString(),
-          error: stderr.toString() || undefined,
-        })
+        if (!input || typeof input.command !== 'string') {
+          return NextResponse.json({ success: false, error: 'Missing or invalid "command" parameter (must be a string).' })
+        }
+        const cwd = input.cwd ? safePath(input.cwd) : PROJECT_ROOT
+        // Safety check
+        const blocked = ['rm -rf /', 'mkfs', ':(){:|:&};:', 'shutdown', 'reboot']
+        if (blocked.some((b) => (input.command || '').toLowerCase().includes(b))) {
+          return NextResponse.json({ tool: 'terminal_exec', success: false, output: '', error: 'Command blocked for safety' })
+        }
+        try {
+          const { stdout, stderr } = await execAsync(input.command, {
+            cwd,
+            timeout: 60000,
+            maxBuffer: 1024 * 1024 * 10,
+            env: { ...process.env, FORCE_COLOR: '0', TERM: 'dumb' },
+            shell: '/bin/zsh',
+          })
+          return NextResponse.json({
+            tool: 'terminal_exec',
+            success: true,
+            output: stdout.toString() || stderr.toString() || '(no output)',
+            cwd,
+          })
+        } catch (execError: unknown) {
+          const err = execError as { stdout?: string; stderr?: string; message?: string }
+          return NextResponse.json({
+            tool: 'terminal_exec',
+            success: false,
+            output: err.stdout?.toString() || '',
+            error: err.stderr?.toString() || err.message || 'Command failed',
+          })
+        }
       }
 
       case 'web_search': {
-        const zai = await ZAI.create()
-        const results = await zai.functions.invoke('web_search', {
-          query: input.query,
-          num: input.num || 10,
-        })
-        return NextResponse.json({
-          tool: 'web_search',
-          success: true,
-          output: JSON.stringify(results, null, 2),
-        })
+        if (!input || typeof input.query !== 'string') {
+          return NextResponse.json({ success: false, error: 'Missing or invalid "query" parameter (must be a string).' })
+        }
+        const query = encodeURIComponent(input.query || '')
+        try {
+          // Try ZAI first if available
+          const zai = await ZAI.create()
+          const results = await zai.functions.invoke('web_search', {
+            query: input.query,
+            num: input.num || 10,
+          })
+          return NextResponse.json({
+            tool: 'web_search',
+            success: true,
+            output: typeof results === 'string' ? results : JSON.stringify(results, null, 2),
+          })
+        } catch {
+          // Fallback to DuckDuckGo
+          try {
+            const ddgRes = await fetch(`https://api.duckduckgo.com/?q=${query}&format=json&no_html=1&skip_disambig=1`)
+            const data = await ddgRes.json()
+            let result = ''
+            if (data.AbstractText) result += `**Summary**: ${data.AbstractText}\n**Source**: ${data.AbstractURL}\n`
+            if (data.RelatedTopics?.length > 0) {
+              result += '\n**Related**:\n'
+              data.RelatedTopics.slice(0, 5).forEach((t: { Text?: string }) => { if (t.Text) result += `- ${t.Text}\n` })
+            }
+            return NextResponse.json({ tool: 'web_search', success: true, output: result || `Search: https://duckduckgo.com/?q=${query}` })
+          } catch {
+            return NextResponse.json({ tool: 'web_search', success: true, output: `Search at: https://duckduckgo.com/?q=${query}` })
+          }
+        }
       }
 
       case 'web_scrape': {
-        const zai2 = await ZAI.create()
-        const content = await zai2.functions.invoke('page_reader', {
-          url: input.url,
-        })
-        return NextResponse.json({
-          tool: 'web_scrape',
-          success: true,
-          output: JSON.stringify(content, null, 2),
-        })
+        if (!input || typeof input.url !== 'string') {
+          return NextResponse.json({ success: false, error: 'Missing or invalid "url" parameter (must be a string).' })
+        }
+        try {
+          const zai2 = await ZAI.create()
+          const content = await zai2.functions.invoke('page_reader', { url: input.url })
+          return NextResponse.json({ tool: 'web_scrape', success: true, output: typeof content === 'string' ? content : JSON.stringify(content, null, 2) })
+        } catch {
+          try {
+            const res = await fetch(input.url, { headers: { 'User-Agent': 'Mozilla/5.0 NaviCode/1.0' } })
+            const html = await res.text()
+            const text = html.replace(/<script[^>]*>[\ \S]*?<\/script>/gi, '').replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000)
+            return NextResponse.json({ tool: 'web_scrape', success: true, output: text })
+          } catch (e) {
+            return NextResponse.json({ tool: 'web_scrape', success: false, output: '', error: `Failed: ${e}` })
+          }
+        }
       }
 
       case 'system_info': {
@@ -134,20 +235,20 @@ export async function POST(request: NextRequest) {
         const cpus = os.cpus()
         const totalMem = os.totalmem()
         const freeMem = os.freemem()
-        return NextResponse.json({
-          tool: 'system_info',
-          success: true,
-          output: JSON.stringify({
-            platform: os.platform(),
-            arch: os.arch(),
-            cpuCores: cpus.length,
-            cpuModel: cpus[0]?.model,
-            totalMemory: `${(totalMem / 1024 / 1024 / 1024).toFixed(2)} GB`,
-            freeMemory: `${(freeMem / 1024 / 1024 / 1024).toFixed(2)} GB`,
-            uptime: `${Math.floor(os.uptime() / 3600)}h ${Math.floor((os.uptime() % 3600) / 60)}m`,
-            hostname: os.hostname(),
-          }, null, 2),
-        })
+        const info = [
+          `**System Information**`,
+          `OS: ${os.platform()} ${os.arch()} (${os.release()})`,
+          `Hostname: ${os.hostname()}`,
+          `User: ${os.userInfo().username}`,
+          `Home: ${os.homedir()}`,
+          `Project Root: ${PROJECT_ROOT}`,
+          ``,
+          `**CPU**: ${cpus[0]?.model} (${cpus.length} cores @ ${cpus[0]?.speed}MHz)`,
+          `**Memory**: ${((totalMem - freeMem) / 1024 / 1024 / 1024).toFixed(2)} GB used / ${(totalMem / 1024 / 1024 / 1024).toFixed(2)} GB total`,
+          `**Node.js**: ${process.version}`,
+          `**Uptime**: ${Math.floor(os.uptime() / 3600)}h ${Math.floor((os.uptime() % 3600) / 60)}m`,
+        ].join('\n')
+        return NextResponse.json({ tool: 'system_info', success: true, output: info })
       }
 
       default:

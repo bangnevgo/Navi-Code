@@ -15,6 +15,8 @@ interface EditorState {
   showTerminal: boolean
   showEditor: boolean
   terminalOutput: TerminalLine[]
+  // Current working directory for tools
+  cwd: string
 
   // Actions
   openFile: (file: Omit<EditorFile, 'id' | 'isDirty'>) => void
@@ -23,6 +25,9 @@ interface EditorState {
   updateFileContent: (id: string, content: string) => void
   toggleTerminal: () => void
   setShowEditor: (show: boolean) => void
+  // New cwd actions
+  setCwd: (cwd: string) => void
+  getCwd: () => string
   addTerminalLine: (line: Omit<TerminalLine, 'id' | 'timestamp'>) => void
   clearTerminal: () => void
 }
@@ -40,6 +45,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   showTerminal: true,
   showEditor: false,
   terminalOutput: [],
+  cwd: process.env.NAVICODE_ROOT || process.env.ZCODE_ROOT || process.cwd(),
 
   openFile: (file) => {
     const existing = get().openFiles.find((f) => f.path === file.path)
@@ -47,6 +53,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       set({ activeFileId: existing.id })
       return
     }
+    // Set cwd to the directory of the newly opened file
+    const dir = file.path.substring(0, file.path.lastIndexOf('/'))
+    set({ cwd: dir })
     const id = `file-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     const newFile: EditorFile = { ...file, id, isDirty: false }
     set((state) => ({
@@ -84,6 +93,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   toggleTerminal: () => set((state) => ({ showTerminal: !state.showTerminal })),
 
   setShowEditor: (show) => set({ showEditor: show }),
+
+  // New actions for cwd
+  setCwd: (cwd) => set({ cwd }),
+  getCwd: () => get().cwd,
 
   addTerminalLine: (line) =>
     set((state) => ({

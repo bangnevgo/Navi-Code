@@ -15,6 +15,7 @@ interface FileState {
   fileTree: FileNode[]
   selectedFilePath: string | null
   expandedFolders: Set<string>
+  rootPath: string | null
 
   // Actions
   setFileTree: (tree: FileNode[]) => void
@@ -23,6 +24,8 @@ interface FileState {
   expandFolder: (path: string) => void
   collapseFolder: (path: string) => void
   getFileByPath: (path: string) => FileNode | undefined
+  setRootPath: (path: string) => void
+  updateNodeChildren: (nodePath: string, children: FileNode[]) => void
 }
 
 const demoProject: FileNode[] = [
@@ -270,13 +273,16 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 ]
 
 export const useFileStore = create<FileState>((set, get) => ({
-  fileTree: demoProject,
+  fileTree: [],
   selectedFilePath: null,
-  expandedFolders: new Set(['/src', '/src/app']),
+  expandedFolders: new Set<string>(),
+  rootPath: null,
 
   setFileTree: (tree) => set({ fileTree: tree }),
 
   selectFile: (path) => set({ selectedFilePath: path }),
+
+  setRootPath: (path) => set({ rootPath: path }),
 
   toggleFolder: (path) =>
     set((state) => {
@@ -301,6 +307,17 @@ export const useFileStore = create<FileState>((set, get) => ({
       const newExpanded = new Set(state.expandedFolders)
       newExpanded.delete(path)
       return { expandedFolders: newExpanded }
+    }),
+
+  updateNodeChildren: (nodePath, children) =>
+    set((state) => {
+      const updateNodes = (nodes: FileNode[]): FileNode[] =>
+        nodes.map((n) => {
+          if (n.path === nodePath) return { ...n, children }
+          if (n.children) return { ...n, children: updateNodes(n.children) }
+          return n
+        })
+      return { fileTree: updateNodes(state.fileTree) }
     }),
 
   getFileByPath: (path) => {

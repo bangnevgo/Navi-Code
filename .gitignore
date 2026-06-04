@@ -30,8 +30,13 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
 
 # vercel
 .vercel
@@ -52,3 +57,14 @@ prompt
 server.log
 # Skills directory
 /skills/
+
+# Local SQLite Database
+/db/*.db
+/db/*.db-journal
+
+# Local Proxy Configurations & Test Files
+fcc-proxy-code.json
+fcc-readme.json
+proxy-info.json
+*.png
+navicode-test.txt

@@ -17,39 +17,39 @@ export interface ProviderConfig {
   description?: string
 }
 
+// Real models from the running FCC proxy at localhost:8082
+// Format: anthropic/<provider>/<model> (FCC routing format)
 export const FCC_PROXY_MODELS = [
-  'nvidia_nim/nvidia/nemotron-3-super-120b-a12b',
-  'nvidia_nim/z-ai/glm5.1',
-  'nvidia_nim/moonshotai/kimi-k2.5',
-  'nvidia_nim/minimaxai/minimax-m2.5',
-  'open_router/openrouter/free',
-  'open_router/anthropic/claude-sonnet-4',
-  'gemini/models/gemini-3.1-flash-lite',
-  'deepseek/deepseek-chat',
-  'mistral/devstral-small-latest',
-  'mistral/mistral-small-latest',
-  'mistral_codestral/codestral-latest',
-  'opencode/gpt-5.3-codex',
-  'opencode/claude-sonnet-4',
-  'opencode/deepseek-v4-flash-free',
-  'opencode/gemini-3-flash',
-  'opencode/big-pickle',
-  'opencode/glm-5.1',
-  'opencode_go/minimax-m2.7',
-  'wafer/DeepSeek-V4-Pro',
-  'wafer/MiniMax-M2.7',
-  'wafer/Qwen3.5-397B-A17B',
-  'wafer/GLM-5.1',
-  'kimi/kimi-k2.5',
-  'cerebras/llama3.1-8b',
-  'cerebras/gpt-oss-120b',
-  'groq/llama-3.3-70b-versatile',
-  'fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct',
-  'zai/glm-5.1',
-  'zai/glm-5-turbo',
-  'lmstudio/local-model',
-  'llamacpp/local-model',
-  'ollama/llama3.1',
+  // ── Kimi / Moonshot ──
+  'anthropic/kimi/kimi-k2.6',
+  'anthropic/kimi/kimi-k2.5',
+  'anthropic/kimi/moonshot-v1-128k',
+  'anthropic/kimi/moonshot-v1-auto',
+  // ── OpenCode (free tiers only) ──
+  'anthropic/opencode/deepseek-v4-flash-free',
+  'anthropic/opencode/mimo-v2.5-free',
+  'anthropic/opencode/minimax-m3-free',
+  'anthropic/opencode/nemotron-3-super-free',
+  'anthropic/opencode/qwen3.6-plus-free',
+  // ── OpenRouter (free tiers & owl-alpha only) ──
+  'anthropic/open_router/openrouter/free',
+  'anthropic/open_router/openrouter/owl-alpha',
+  'anthropic/open_router/moonshotai/kimi-k2.6:free',
+  // ── Z.ai ──
+  'anthropic/zai/glm-4.6',
+  'anthropic/zai/glm-4.5',
+  'anthropic/zai/glm-4.5-air',
+  // ── DeepSeek ──
+  'anthropic/deepseek/deepseek-v4-pro',
+  'anthropic/deepseek/deepseek-v4-flash',
+  // ── NVIDIA NIM (highlights) ──
+  'anthropic/nvidia_nim/nvidia/nemotron-3-super-120b-a12b',
+  'anthropic/nvidia_nim/moonshotai/kimi-k2.6',
+  'anthropic/nvidia_nim/deepseek-ai/deepseek-v4-pro',
+  'anthropic/nvidia_nim/deepseek-ai/deepseek-v4-flash',
+  'anthropic/nvidia_nim/meta/llama-3.3-70b-instruct',
+  'anthropic/nvidia_nim/mistralai/devstral-small-2505',
+  'anthropic/nvidia_nim/qwen/qwen3-235b-a22b',
 ]
 
 export const FCC_DEFAULT_API_KEY = 'freecc'
@@ -57,13 +57,13 @@ export const FCC_DEFAULT_API_KEY = 'freecc'
 export const PRESET_PROVIDERS: Omit<ProviderConfig, 'id' | 'apiKey' | 'isActive'>[] = [
   // ─── Built-in ───
   {
-    name: 'ZCode (Built-in)',
+    name: 'NaviCode (Built-in)',
     baseUrl: '',
     models: ['glm-4-plus', 'glm-4-flash', 'glm-4-long'],
     type: 'builtin',
     icon: '🤖',
     apiFormat: 'builtin',
-    description: 'Default ZCode AI - no setup required',
+    description: 'Default NaviCode AI - no setup required',
   },
   // ─── Free Claude Code Proxy ───
   {
@@ -255,22 +255,34 @@ interface ProviderState {
 
 const defaultProviders: ProviderConfig[] = [
   {
-    id: 'builtin-zcode',
-    name: 'ZCode (Built-in)',
+    id: 'builtin-navicode',
+    name: 'NaviCode (Built-in)',
     baseUrl: '',
     apiKey: '',
     models: ['glm-4-plus', 'glm-4-flash', 'glm-4-long'],
-    isActive: true,
+    isActive: false,
     icon: '🤖',
     type: 'builtin',
     apiFormat: 'builtin',
-    description: 'Default ZCode AI - no setup required',
+    description: 'Default NaviCode AI - no setup required',
   },
-  ...PRESET_PROVIDERS.filter((p) => p.type === 'custom').map((p, i) => ({
+  {
+    id: 'fcc-proxy',
+    name: 'Free Claude Code (FCC Proxy)',
+    baseUrl: 'http://localhost:8082',
+    apiKey: 'freecc',
+    models: FCC_PROXY_MODELS,
+    isActive: true,
+    icon: '🆓',
+    type: 'custom',
+    apiFormat: 'anthropic',
+    headers: {},
+    description: 'Free Claude Code proxy — 749+ models via local proxy',
+  },
+  ...PRESET_PROVIDERS.filter((p) => p.type === 'custom' && p.name !== 'Free Claude Code (FCC Proxy)').map((p, i) => ({
     ...p,
     id: `preset-${i}`,
-    // Set default API key for FCC proxy
-    apiKey: p.name === 'Free Claude Code (FCC Proxy)' ? FCC_DEFAULT_API_KEY : '',
+    apiKey: '',
     isActive: false,
   })),
 ]
@@ -279,8 +291,8 @@ export const useProviderStore = create<ProviderState>()(
   persist(
     (set, get) => ({
       providers: defaultProviders,
-      activeProviderId: 'builtin-zcode',
-      selectedModel: 'glm-4-plus',
+      activeProviderId: 'fcc-proxy',
+      selectedModel: 'anthropic/opencode/deepseek-v4-flash-free',
       isFetchingModels: {},
       fetchModelsError: {},
 
@@ -300,7 +312,7 @@ export const useProviderStore = create<ProviderState>()(
       removeProvider: (id) =>
         set((state) => ({
           providers: state.providers.filter((p) => p.id !== id),
-          activeProviderId: state.activeProviderId === id ? 'builtin-zcode' : state.activeProviderId,
+          activeProviderId: state.activeProviderId === id ? 'builtin-navicode' : state.activeProviderId,
         })),
 
       setActiveProvider: (id) => {
@@ -315,7 +327,13 @@ export const useProviderStore = create<ProviderState>()(
 
       getActiveProvider: () => {
         const state = get()
-        return state.providers.find((p) => p.id === state.activeProviderId)
+        const provider = state.providers.find((p) => p.id === state.activeProviderId)
+        // FCC proxy must always use 'freecc' as apiKey — force it unconditionally
+        // to avoid corruption from localStorage merge
+        if (provider && provider.id === 'fcc-proxy') {
+          return { ...provider, apiKey: 'freecc' }
+        }
+        return provider
       },
 
       getAllModels: () => {
@@ -360,7 +378,22 @@ export const useProviderStore = create<ProviderState>()(
             return []
           }
 
-          const modelIds: string[] = (data.models || []).map((m: { id: string }) => m.id)
+          let modelIds: string[] = (data.models || []).map((m: { id: string }) => m.id)
+
+          if (providerId === 'fcc-proxy') {
+            modelIds = modelIds.filter((id) => {
+              const lowerId = id.toLowerCase()
+              // Filter opencode: only keep if it contains "free"
+              if (lowerId.includes('opencode')) {
+                return lowerId.includes('free')
+              }
+              // Filter open_router / openrouter: only keep if it contains "free" OR matches "openrouter/owl-alpha"
+              if (lowerId.includes('open_router') || lowerId.includes('openrouter')) {
+                return lowerId.includes('free') || lowerId.includes('openrouter/owl-alpha')
+              }
+              return true
+            })
+          }
 
           if (modelIds.length > 0) {
             set((state) => ({
@@ -389,23 +422,57 @@ export const useProviderStore = create<ProviderState>()(
       },
     }),
     {
-      name: 'zcode-providers',
+      name: 'navicode-providers',
+      version: 5, // v5: filter fcc-proxy models and update them
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         providers: state.providers.map((p) => ({ ...p, apiKey: btoa(p.apiKey) })),
         activeProviderId: state.activeProviderId,
         selectedModel: state.selectedModel,
       }),
+      migrate: (persistedState, version) => {
+        // Version < 4: reset completely to clear corrupted apiKey data
+        if (version < 4) {
+          return {
+            providers: defaultProviders,
+            activeProviderId: 'fcc-proxy',
+            selectedModel: 'anthropic/opencode/deepseek-v4-flash-free',
+          }
+        }
+        if (version < 5) {
+          const state = persistedState as Partial<ProviderState>
+          if (state.providers) {
+            state.providers = state.providers.map((p) => {
+              if (p.id === 'fcc-proxy') {
+                return { ...p, models: FCC_PROXY_MODELS }
+              }
+              return p
+            })
+          }
+          return state
+        }
+        return persistedState as Partial<ProviderState>
+      },
       merge: (persistedState: unknown, currentState) => {
         const ps = persistedState as Partial<ProviderState> & Record<string, unknown>
         if (ps.providers) {
-          ps.providers = ps.providers.map((p) => ({
-            ...p,
-            apiKey: typeof p.apiKey === 'string' ? atob(p.apiKey) : '',
-          }))
+          ps.providers = ps.providers.map((p) => {
+            let decoded = ''
+            if (typeof p.apiKey === 'string') {
+              try { decoded = atob(p.apiKey) } catch { decoded = p.apiKey }
+            }
+            // FCC proxy must always be 'freecc' — override regardless of storage
+            if (p.id === 'fcc-proxy') return { ...p, apiKey: 'freecc' }
+            return { ...p, apiKey: decoded }
+          })
+          // Ensure fcc-proxy exists
+          if (!ps.providers.some((p: ProviderConfig) => p.id === 'fcc-proxy')) {
+            ps.providers = [defaultProviders[1], ...ps.providers]
+          }
         }
         return { ...currentState, ...ps }
       },
     }
+
   )
 )

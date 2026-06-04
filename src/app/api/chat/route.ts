@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import ZAI from 'z-ai-web-dev-sdk'
 
+export const dynamic = 'force-dynamic'
+
 interface ChatMessageInput {
   role: string
   content: string
@@ -27,6 +29,7 @@ export async function POST(request: NextRequest) {
       model,
       provider,
       enabledSkills,
+      systemPromptOverride,
     }: {
       messages: ChatMessageInput[]
       model: string
@@ -40,42 +43,71 @@ export async function POST(request: NextRequest) {
         apiFormat?: ApiFormat
       }
       enabledSkills?: string[]
+      systemPromptOverride?: string
     } = await request.json()
+
+    // Expand slash commands into agent workflows
+    if (messages && messages.length > 0) {
+      const lastMessage = messages[messages.length - 1]
+      if (lastMessage && lastMessage.role === 'user') {
+        const text = lastMessage.content.trim()
+        if (text.startsWith('/doctor')) {
+          lastMessage.content = `Perform system diagnostics using the system_info tool. Output a comprehensive report checklist checking Node version, free RAM/memory, hostname, OS, and workspace status. Present it as a NaviCode System Doctor Report.`
+        } else if (text.startsWith('/review')) {
+          lastMessage.content = `Run terminal_exec tool with command "git diff" to review recent changes in the workspace. Perform a detailed code review pointing out any potential bugs, clean code violations, performance bottlenecks, and security flaws.`
+        } else if (text.startsWith('/commit')) {
+          const args = text.slice(7).trim()
+          lastMessage.content = `First, run the terminal_exec tool with command "git diff --staged" and "git status" to inspect the current staged changes in the workspace.
+If there are no staged changes, advise the user to stage files using git add or check git status.
+If there are staged changes, generate a concise, conventional git commit message based on the diff.
+Then, execute "git commit -m '<commit message>'" using terminal_exec to automatically create the commit.
+${args ? `Use this description as the basis for the commit message: "${args}"` : ''}`
+        } else if (text.startsWith('/vuln')) {
+          lastMessage.content = `Scan the codebase for potential security vulnerabilities. Search files for sensitive keys, hardcoded credentials, eval statements, or unsafe terminal command executions.`
+        } else if (text.startsWith('/bug')) {
+          const args = text.slice(4).trim()
+          lastMessage.content = `Inspect the codebase to identify potential bugs. ${args ? `Focus on: "${args}".` : 'Analyze the active files and directory structure to find logic issues or runtime errors.'}`
+        } else if (text.startsWith('/test')) {
+          const args = text.slice(5).trim()
+          lastMessage.content = `Check the workspace files to see what testing frameworks are used. Generate and run tests using terminal_exec. ${args ? `Additional context: "${args}"` : ''}`
+        } else if (text.startsWith('/explain')) {
+          const args = text.slice(8).trim()
+          lastMessage.content = `Thoroughly explain the selected code or concept. ${args ? `Explain: "${args}"` : 'Analyze the active workspace files and explain how the project is structured.'}`
+        } else if (text.startsWith('/search')) {
+          const args = text.slice(7).trim()
+          lastMessage.content = `Search the workspace for "${args}" using file_search. Analyze and report the results.`
+        }
+      }
+    }
 
     // Build skills context
     const skillsContext = enabledSkills?.length
       ? `\n\nYou have access to the following tools/skills that you can invoke by responding with special JSON blocks:\n\n${enabledSkills
-          .map((s) => `- ${s}`)
-          .join('\n')}\n\nTo use a tool, respond with a JSON block in this format:\n\`\`\`tool\n{"tool": "tool-name", "input": {"key": "value"}}\n\`\`\`\n\nAvailable tools:\n- \`file_read\`: Read a file. Input: {"path": "/path/to/file"}\n- \`file_write\`: Write/create a file. Input: {"path": "/path/to/file", "content": "file content"}\n- \`file_list\`: List directory contents. Input: {"path": "/path/to/dir"}\n- \`file_delete\`: Delete a file. Input: {"path": "/path/to/file"}\n- \`file_search\`: Search files by name/content. Input: {"query": "search term", "path": "/search/dir"}\n- \`terminal_exec\`: Execute a terminal command. Input: {"command": "shell command", "cwd": "/working/dir"}\n- \`web_search\`: Search the web. Input: {"query": "search query"}\n- \`web_scrape\`: Scrape a web page. Input: {"url": "https://example.com"}\n- \`system_info\`: Get system information. Input: {}\n\nWhen you need to use a tool, include the JSON block in your response. The user's system will execute the tool and return the result. You can then continue with your response based on the tool output.\n\nIMPORTANT: For file operations and terminal commands, always confirm with the user before executing destructive operations (delete, overwrite).`
+          .map((s) => `- ${s.replace(/-/g, '_')}`)
+          .join('\n')}\n\nTo use a tool, respond with a JSON block in this format:\n\`\`\`tool\n{"tool": "tool-name", "input": {"key": "value"}}\n\`\`\`\n\nAvailable tools:\n- \`file_read\`: Read a file. Input: {"path": "/path/to/file"}\n- \`file_write\`: Write/create a file. Input: {"path": "/path/to/file", "content": "file content"}\n- \`file_list\`: List directory contents. Input: {"path": "/path/to/dir"}\n- \`file_delete\`: Delete a file. Input: {"path": "/path/to/file"}\n- \`file_search\`: Search files by name/content. Input: {"query": "search term", "path": "/search/dir"}\n- \`terminal_exec\`: Execute a terminal command. Input: {"command": "shell command", "cwd": "/working/dir"}. Note: changing directories via "cd" does not persist across separate calls. Chain commands with "&&" (e.g. "cd dir && command") or pass the "cwd" parameter.\n- \`web_search\`: Search the web. Input: {"query": "search query"}\n- \`web_scrape\`: Scrape a web page. Input: {"url": "https://example.com"}\n- \`system_info\`: Get system information. Input: {}\n- \`ask_question\`: Ask the user a clarifying question or request feedback. Input: {"question": "Question text to present", "options": ["Option A", "Option B"]} (options array is optional; omit for write-in open responses).\n- \`start_subagent\`: Spawn a specialized subagent in the background to execute a task. Input: {"name": "subagent_name", "prompt": "specific prompt/instructions for the subagent"}.\n\nWhen you need to use a tool, output ONLY the JSON block and STOP generating further text immediately. Do not write anything after the tool block. The user's system will automatically execute the tool, display the result to you in the next message, and trigger your next response. You can then write your explanation or call another tool based on the real tool output.\n\nIMPORTANT: For file operations and terminal commands, always confirm with the user before executing destructive operations (delete, overwrite).`
       : ''
 
-    const systemPrompt = `You are ZCode, an expert AI coding assistant that combines the best features of Claude Code, OpenAI Codex, and OpenCode. You help developers with:
+    const systemPrompt = systemPromptOverride || `You are NaviCode, an elite, autonomous AI coding agent mirroring the capabilities, rigor, and behaviors of Claude Code. You operate in a stateful multi-turn tool-use loop to research, edit, test, and verify code directly on the user's workspace.
 
-1. **Code Generation**: Write clean, efficient, well-documented code in any language
-2. **Code Review**: Analyze code for bugs, performance issues, and best practices
-3. **Debugging**: Help identify and fix errors in code
-4. **Refactoring**: Suggest improvements to code structure and readability
-5. **Architecture**: Help design scalable software architectures
-6. **Explanation**: Explain complex code and concepts clearly
-7. **File Operations**: Read, write, search, and manage files on the user's local filesystem
-8. **Terminal Commands**: Execute shell commands on the user's local machine
-9. **Web Search**: Search the internet for current information
-10. **System Info**: Access system information about the user's machine
+### Core Mission & Capabilities
+1. **Autonomous Execution**: You do not just describe changes; you perform them using the available filesystem and terminal tools. You break down complex requests into incremental steps and verify each step.
+2. **Meticulous Codebase Research**: Before editing, you search for symbol definitions, imports, and file structures. You never guess. You read files completely to understand context.
+3. **Continuous Verification Loop (TDD)**:
+   - When writing code or fixing bugs, you identify or write corresponding tests first.
+   - You execute compilation, linting, or test commands using \`terminal_exec\` to observe failures.
+   - You apply code edits, then run tests/compilation again. If errors are encountered, you read the compiler/test logs, fix the code, and re-run verification until all checks pass.
+4. **Filesystem Integrity**: You read, write, search, and delete files on the local filesystem. You preserve existing comment blocks, documentation, styling, and imports unless explicitly told to change them.
+5. **Stateful Shell Operations**: You run shell commands. Remember that shell environments do not persist directories across separate \`terminal_exec\` calls; you chain commands using \`&&\` (e.g., \`cd path && command\`) or use the \`cwd\` parameter.
+6. **Linguistic & Workspace Adaptability**: In Indonesian, terms like "direktori utama", "folder utama", or "root" can refer to the project workspace root, the user's home directory (~), or the OS root (/). When tasked to find or inspect files in these directories, systematically check all three locations to ensure you find the correct path.
 
-When providing code:
-- Always use markdown code blocks with the appropriate language tag
-- Include a filename comment at the top when relevant (e.g., // filepath: src/app/page.tsx)
-- Write production-quality code with proper error handling
-- Follow best practices and design patterns for the given language/framework
-- Add helpful comments for complex logic
+### Guidelines for Tool Use & Formatting
+- **STOP Protocol**: To run a tool, you output ONLY the JSON block inside the \`\`\`tool\`\`\` markdown block and STOP generating text immediately. Do not write text before or after the tool block. Wait for the system to execute the tool and feed the result into your context in the next turn.
+- **Code Block Formatting**: Always use standard markdown code blocks with the language tag. Include a filename comment at the top (e.g., \`// filepath: src/app/page.tsx\`).
+- **Production-Quality Code**: Write clean, modern, type-safe, and robust code with comprehensive error handling. Never use mock placeholders or ellipses (\`// ...\`) in modified files; always return the complete updated content.
+- **No Hallucinated Results**: Never invent or hallucinate tool outputs. Always call the tool and let the client execute it.
 
-Be concise but thorough. If asked to modify code, show the complete modified file.
-When suggesting file operations, use the format:
-- CREATE: filename
-- EDIT: filename
-- DELETE: filename
 ${skillsContext}
-You are running inside a modern IDE-like web interface called ZCode. The user can see their project files and edit code directly.`
+You are running inside a modern IDE-like web interface called NaviCode. The user can see their project files, active terminal, and editor directly. Your terminal runs in ${process.platform === 'win32' ? 'cmd.exe' : 'zsh'}.`
 
     // Determine API format
     const apiFormat: ApiFormat = provider?.apiFormat || detectApiFormat(provider?.name || '', provider?.baseUrl || '')
@@ -99,12 +131,22 @@ You are running inside a modern IDE-like web interface called ZCode. The user ca
 }
 
 function allMessages(systemPrompt: string, messages: ChatMessageInput[]) {
+  const normalizedMessages = messages.map((m) => ({
+    role: m.role as 'user' | 'assistant',
+    content: m.content,
+  }))
+
+  // Prepend system prompt to the first user message as a fallback/reinforcement
+  if (normalizedMessages.length > 0 && normalizedMessages[0].role === 'user') {
+    normalizedMessages[0] = {
+      ...normalizedMessages[0],
+      content: `[System Instruction: ${systemPrompt}]\n\n${normalizedMessages[0].content}`
+    }
+  }
+
   return [
     { role: 'system' as const, content: systemPrompt },
-    ...messages.map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    })),
+    ...normalizedMessages
   ]
 }
 
@@ -197,8 +239,8 @@ async function handleOpenAIProvider(
   }
 
   if (provider.name?.toLowerCase().includes('openrouter')) {
-    headers['HTTP-Referer'] = 'https://zcode.dev'
-    headers['X-Title'] = 'ZCode AI Assistant'
+    headers['HTTP-Referer'] = 'https://navicode.dev'
+    headers['X-Title'] = 'NaviCode AI Assistant'
   }
 
   const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -289,10 +331,11 @@ async function handleAnthropicProvider(
 ) {
   const baseUrl = (provider.baseUrl || '').replace(/\/$/, '')
   const fcc = isFccProxy(provider.name, baseUrl)
+  const apiKey = fcc && !provider.apiKey ? 'freecc' : provider.apiKey
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'x-api-key': provider.apiKey,
+    'x-api-key': apiKey,
     'anthropic-version': '2023-06-01',
     ...provider.headers,
   }
@@ -300,7 +343,7 @@ async function handleAnthropicProvider(
   // For FCC proxy and other Anthropic proxies, also set Bearer auth
   // since some proxies accept both formats. FCC proxy prefers x-api-key.
   if (!headers['Authorization']) {
-    headers['Authorization'] = `Bearer ${provider.apiKey}`
+    headers['Authorization'] = `Bearer ${apiKey}`
   }
 
   // Convert messages to Anthropic format
@@ -311,6 +354,15 @@ async function handleAnthropicProvider(
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }))
+
+  // Prepend system prompt to the first user message as a fallback/reinforcement
+  // to ensure proxies/providers that strip or ignore the system prompt field still receive it.
+  if (anthropicMessages.length > 0 && anthropicMessages[0].role === 'user') {
+    anthropicMessages[0] = {
+      ...anthropicMessages[0],
+      content: `[System Instruction: ${systemPrompt}]\n\n${anthropicMessages[0].content}`
+    }
+  }
 
   // Determine the model to send
   // FCC proxy expects the full slug with provider prefix (e.g., "nvidia_nim/model")
@@ -504,9 +556,9 @@ function proxyAnthropicStream(response: Response): Response {
         }
         // Ensure thinking block is closed at end of stream
         if (isInThinkingBlock) {
-          controller.enqueue(encoder.encode('\n</thinking>'))
+          try { controller.enqueue(encoder.encode('\n</thinking>')) } catch {}
         }
-        controller.close()
+        try { controller.close() } catch {}
       } catch (error) {
         console.error('Anthropic stream error:', error)
         controller.error(error)

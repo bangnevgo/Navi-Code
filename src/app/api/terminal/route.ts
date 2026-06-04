@@ -4,7 +4,7 @@ import { promisify } from 'util'
 
 const execAsync = promisify(exec)
 
-const PROJECT_ROOT = '/home/z/my-project'
+const PROJECT_ROOT = process.env.NAVICODE_ROOT || process.env.ZCODE_ROOT || process.cwd()
 
 const BLOCKED_COMMANDS = [
   'rm -rf /', 'mkfs', 'dd if=', 'format', ':(){:|:&};:',
@@ -23,7 +23,7 @@ function isCommandSafe(command: string): { safe: boolean; reason?: string } {
 
 export async function POST(request: NextRequest) {
   try {
-    const { command, cwd, timeout = 30000, autoApprove = false } = await request.json()
+    const { command, cwd, timeout = 30000 } = await request.json()
 
     if (!command || typeof command !== 'string') {
       return NextResponse.json({ error: 'Command is required' }, { status: 400 })
@@ -49,6 +49,7 @@ export async function POST(request: NextRequest) {
         timeout: maxTimeout,
         maxBuffer: 1024 * 1024 * 10,
         env: { ...process.env, FORCE_COLOR: '0', TERM: 'dumb' },
+        shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/zsh',
       })
 
       return NextResponse.json({
@@ -75,4 +76,15 @@ export async function POST(request: NextRequest) {
     const message = error instanceof Error ? error.message : 'Unknown error'
     return NextResponse.json({ success: false, error: message }, { status: 500 })
   }
+}
+
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url)
+  const action = searchParams.get('action')
+
+  if (action === 'cwd') {
+    return NextResponse.json({ cwd: PROJECT_ROOT })
+  }
+
+  return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
 }

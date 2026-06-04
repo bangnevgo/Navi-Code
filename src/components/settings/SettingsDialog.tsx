@@ -178,8 +178,8 @@ export function SettingsDialog() {
           ...provider.headers,
         }
         if (provider.name.toLowerCase().includes('openrouter')) {
-          headers['HTTP-Referer'] = 'https://zcode.dev'
-          headers['X-Title'] = 'ZCode'
+          headers['HTTP-Referer'] = 'https://navicode.dev'
+          headers['X-Title'] = 'NaviCode'
         }
 
         // Use our models API for consistent behavior
@@ -358,7 +358,7 @@ export function SettingsDialog() {
                         <div className="flex items-start gap-2">
                           <span className="font-bold text-emerald-500 min-w-[16px]">4</span>
                           <div className="flex-1">
-                            <span className="font-medium">In ZCode,</span> select <strong>FCC Proxy</strong> and enter auth token (default: <code className="bg-black/30 px-1 rounded">{FCC_DEFAULT_API_KEY}</code>)
+                            <span className="font-medium">In NaviCode,</span> select <strong>FCC Proxy</strong> and enter auth token (default: <code className="bg-black/30 px-1 rounded">{FCC_DEFAULT_API_KEY}</code>)
                           </div>
                         </div>
                         <div className="flex items-start gap-2">
@@ -394,7 +394,7 @@ export function SettingsDialog() {
                 Configure your AI model providers. Supports OpenAI and Anthropic API formats.
               </p>
 
-              <Accordion type="multiple" defaultValue={['builtin-zcode']} className="space-y-2">
+              <Accordion type="multiple" defaultValue={['builtin-navicode']} className="space-y-2">
                 {providers.map((provider) => (
                   <AccordionItem
                     key={provider.id}

@@ -146,12 +146,41 @@ function normalizeModelEntry(entry: unknown): ModelEntry {
   }
   if (typeof entry === 'object' && entry !== null) {
     const obj = entry as Record<string, unknown>
+    // FCC proxy uses 'display_name', standard uses 'name'
+    const name = obj.display_name || obj.name
     return {
       id: String(obj.id || obj.model || obj.name || ''),
-      name: obj.name ? String(obj.name) : undefined,
+      name: name ? String(name) : undefined,
       owned_by: obj.owned_by ? String(obj.owned_by) : undefined,
       created: typeof obj.created === 'number' ? obj.created : undefined,
     }
   }
   return { id: String(entry) }
+}
+
+// GET endpoint: quick connection health check
+export async function GET(request: NextRequest) {
+  const url = new URL(request.url)
+  const baseUrl = url.searchParams.get('baseUrl') || 'http://localhost:8082'
+  const apiKey = url.searchParams.get('apiKey') || 'freecc'
+  const cleanBaseUrl = baseUrl.replace(/\/$/, '')
+
+  try {
+    const res = await fetch(`${cleanBaseUrl}/v1/models`, {
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!res.ok) {
+      return NextResponse.json({ connected: false, error: `HTTP ${res.status}`, models: 0 })
+    }
+    const data = await res.json()
+    const count = (data.data || data.models || []).length
+    return NextResponse.json({ connected: true, models: count, url: cleanBaseUrl })
+  } catch (e) {
+    return NextResponse.json({
+      connected: false,
+      error: e instanceof Error ? e.message : 'Connection failed',
+      models: 0,
+    })
+  }
 }

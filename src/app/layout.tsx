@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ZCode - AI Coding Assistant",
+  title: "NaviCode - AI Coding Assistant",
   description: "AI-powered coding assistant combining the best of Claude Code, Codex, and OpenCode",
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",

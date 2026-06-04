@@ -41,6 +41,7 @@ interface ChatState {
   updateMessage: (conversationId: string, messageId: string, updates: Partial<ChatMessage>) => void
   appendToMessage: (conversationId: string, messageId: string, content: string) => void
   setStreaming: (streaming: boolean) => void
+  setMessages: (conversationId: string, messages: ChatMessage[]) => void
   getActiveConversation: () => Conversation | undefined
 }
 
@@ -119,6 +120,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })),
 
   setStreaming: (streaming) => set({ isStreaming: streaming }),
+
+  setMessages: (conversationId, messages) =>
+    set((state) => ({
+      conversations: state.conversations.map((c) =>
+        c.id === conversationId ? { ...c, messages, updatedAt: Date.now() } : c
+      ),
+    })),
 
   getActiveConversation: () => {
     const state = get()
