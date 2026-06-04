@@ -229,4 +229,4 @@ NaviCode is one of several AI-powered coding tools. Here's how it compares with 
 
 ## License
 
-MIT
+imagents-ai.com
