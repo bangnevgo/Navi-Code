@@ -227,6 +227,11 @@ NaviCode is one of several AI-powered coding tools. Here's how it compares with 
 >
 > If you deploy NaviCode to a public production cloud environment (e.g., SaaS), **you must isolate the terminal execution environment** inside secure, sandboxed containers (Docker, Fly.io micro-VMs, or gVisor) to prevent malicious actors from gaining root access to the host server.
 
+## Contributors
+
+- **bangnevgo** — Creator & Developer
+- **Google DeepMind Antigravity** — AI pair-programming partner
+
 ## License
 
 imagents-ai.com
