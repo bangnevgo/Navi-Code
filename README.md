@@ -1,5 +1,7 @@
 # NaviCode IDE
 
+![NaviCode IDE](navicode_ss.png)
+
 A web-based Integrated Development Environment (IDE) with a built-in autonomous AI coding agent. Features a code editor, terminal emulator, file explorer, and an AI chat panel capable of reading/writing files, executing shell commands, and browsing the web directly from your browser.
 
 ---
