@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { exec } from 'child_process'
+import { exec, spawn } from 'child_process'
 import { promisify } from 'util'
 import { readFile, writeFile, unlink, readdir, stat, mkdir } from 'fs/promises'
 import { join, resolve, dirname } from 'path'
@@ -27,6 +27,21 @@ function resolvePath(p: string | undefined, base: string): string {
   if (!p) return base
   if (p.startsWith('/')) return safePath(p)
   return resolve(base, p)
+}
+
+function runSqliteQuery(dbPath: string, sql: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn('sqlite3', [dbPath, '-header', '-column'])
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (data) => { stdout += data })
+    child.stderr.on('data', (data) => { stderr += data })
+    child.on('close', (code) => {
+      resolve({ stdout, stderr })
+    })
+    child.stdin.write(sql)
+    child.stdin.end()
+  })
 }
 
 export async function POST(request: NextRequest) {
@@ -249,6 +264,99 @@ export async function POST(request: NextRequest) {
           `**Uptime**: ${Math.floor(os.uptime() / 3600)}h ${Math.floor((os.uptime() % 3600) / 60)}m`,
         ].join('\n')
         return NextResponse.json({ tool: 'system_info', success: true, output: info })
+      }
+
+      case 'file_download': {
+        if (!input || typeof input.url !== 'string' || typeof input.path !== 'string') {
+          return NextResponse.json({ success: false, error: 'Missing or invalid "url" or "path" parameters.' })
+        }
+        const base = getBaseDir(input)
+        const destPath = resolvePath(input.path, base)
+        try {
+          await mkdir(dirname(destPath), { recursive: true })
+          const res = await fetch(input.url)
+          if (!res.ok) throw new Error(`HTTP error ${res.status}: ${res.statusText}`)
+          const buffer = await res.arrayBuffer()
+          await writeFile(destPath, Buffer.from(buffer))
+          return NextResponse.json({
+            tool: 'file_download',
+            success: true,
+            output: `Successfully downloaded ${input.url} to ${input.path} (${buffer.byteLength} bytes)`,
+          })
+        } catch (e: any) {
+          return NextResponse.json({
+            tool: 'file_download',
+            success: false,
+            error: e.message || 'Download failed',
+          })
+        }
+      }
+
+      case 'http_client': {
+        if (!input || typeof input.url !== 'string') {
+          return NextResponse.json({ success: false, error: 'Missing or invalid "url" parameter (must be a string).' })
+        }
+        const method = (input.method || 'GET').toUpperCase()
+        const headers = input.headers || {}
+        const body = input.body ? (typeof input.body === 'string' ? input.body : JSON.stringify(input.body)) : undefined
+        try {
+          const res = await fetch(input.url, {
+            method,
+            headers,
+            body,
+          })
+          const text = await res.text()
+          let parsedBody
+          try {
+            parsedBody = JSON.parse(text)
+          } catch {
+            parsedBody = text
+          }
+          return NextResponse.json({
+            tool: 'http_client',
+            success: true,
+            output: JSON.stringify({
+              status: res.status,
+              statusText: res.statusText,
+              headers: Object.fromEntries(res.headers.entries()),
+              body: parsedBody,
+            }, null, 2),
+          })
+        } catch (e: any) {
+          return NextResponse.json({
+            tool: 'http_client',
+            success: false,
+            error: e.message || 'HTTP request failed',
+          })
+        }
+      }
+
+      case 'db_query': {
+        if (!input || typeof input.query !== 'string') {
+          return NextResponse.json({ success: false, error: 'Missing or invalid "query" parameter (must be a string).' })
+        }
+        const dbPath = input.db_path ? resolvePath(input.db_path, getBaseDir(input)) : resolve(PROJECT_ROOT, 'db/custom.db')
+        try {
+          const { stdout, stderr } = await runSqliteQuery(dbPath, input.query)
+          if (stderr) {
+            return NextResponse.json({
+              tool: 'db_query',
+              success: false,
+              error: stderr.trim(),
+            })
+          }
+          return NextResponse.json({
+            tool: 'db_query',
+            success: true,
+            output: stdout.trim() || '(no rows returned)',
+          })
+        } catch (e: any) {
+          return NextResponse.json({
+            tool: 'db_query',
+            success: false,
+            error: e.message || 'Database query execution failed',
+          })
+        }
       }
 
       default:

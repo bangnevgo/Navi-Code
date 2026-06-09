@@ -214,6 +214,15 @@ export const PRESET_PROVIDERS: Omit<ProviderConfig, 'id' | 'apiKey' | 'isActive'
     apiFormat: 'anthropic',
     description: 'Z.ai - Anthropic-compatible endpoint',
   },
+  {
+    name: 'Higgsfield AI',
+    baseUrl: 'https://api.higgsfield.ai/v1',
+    models: ['soul-v2', 'cinema-studio', 'flux-dev'],
+    type: 'custom',
+    icon: '🎥',
+    apiFormat: 'openai',
+    description: 'Higgsfield AI - cinematic video & image generation',
+  },
   // ─── Local Providers ───
   {
     name: 'LM Studio (Local)',
@@ -423,7 +432,7 @@ export const useProviderStore = create<ProviderState>()(
     }),
     {
       name: 'navicode-providers',
-      version: 5, // v5: filter fcc-proxy models and update them
+      version: 6, // v6: add Higgsfield AI preset and merge default presets
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         providers: state.providers.map((p) => ({ ...p, apiKey: btoa(p.apiKey) })),
@@ -468,6 +477,13 @@ export const useProviderStore = create<ProviderState>()(
           // Ensure fcc-proxy exists
           if (!ps.providers.some((p: ProviderConfig) => p.id === 'fcc-proxy')) {
             ps.providers = [defaultProviders[1], ...ps.providers]
+          }
+
+          // Merge missing default providers into local storage so new presets like Higgsfield show up automatically
+          const existingNames = new Set(ps.providers.map((p) => p.name))
+          const missingDefaults = currentState.providers.filter((p) => !existingNames.has(p.name))
+          if (missingDefaults.length > 0) {
+            ps.providers = [...ps.providers, ...missingDefaults]
           }
         }
         return { ...currentState, ...ps }

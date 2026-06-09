@@ -160,6 +160,36 @@ export const AVAILABLE_SKILLS: AgentSkill[] = [
     enabled: true,
     requiresConfirmation: true,
   },
+  {
+    id: 'file-download',
+    name: 'Download File',
+    description: 'Download files from any URL directly into the workspace',
+    icon: '📥',
+    category: 'web',
+    enabled: true,
+    requiresConfirmation: true,
+    apiEndpoint: '/api/tools',
+  },
+  {
+    id: 'http-client',
+    name: 'HTTP Client',
+    description: 'Execute HTTP requests (GET, POST, etc.) to test APIs',
+    icon: '🌐',
+    category: 'web',
+    enabled: true,
+    requiresConfirmation: false,
+    apiEndpoint: '/api/tools',
+  },
+  {
+    id: 'db-query',
+    name: 'Database Query',
+    description: 'Execute raw queries on the workspace SQLite database',
+    icon: '🗄️',
+    category: 'system',
+    enabled: true,
+    requiresConfirmation: true,
+    apiEndpoint: '/api/tools',
+  },
 ]
 
 interface SkillState {

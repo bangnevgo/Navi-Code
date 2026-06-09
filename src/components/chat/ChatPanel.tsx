@@ -4,7 +4,7 @@ import { useRef, useEffect, useCallback, useState, useMemo } from 'react'
 import { useChatStore, type ChatMessage, type CodeBlock } from '@/stores/chat-store'
 import { useEditorStore } from '@/stores/editor-store'
 import { useProviderStore } from '@/stores/provider-store'
-import { useSkillStore, AVAILABLE_SKILLS } from '@/stores/skill-store'
+import { useSkillStore } from '@/stores/skill-store'
 import { ChatMessage as ChatMessageComponent } from './ChatMessage'
 import { ChatInput } from './ChatInput'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -12,19 +12,6 @@ import { Button } from '@/components/ui/button'
 import { Sparkles, MessageSquarePlus, Trash2, ChevronDown, Check } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
-import { cn } from '@/lib/utils'
-
-const toolToSkillIdMap: Record<string, string> = {
-  file_read: 'file-read',
-  file_write: 'file-write',
-  file_list: 'file-list',
-  file_delete: 'file-delete',
-  file_search: 'file-search',
-  terminal_exec: 'terminal-exec',
-  web_search: 'web-search',
-  web_scrape: 'web-scrape',
-  system_info: 'system-info',
-}
 
 export function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -40,38 +27,12 @@ export function ChatPanel() {
     setStreaming,
     getActiveConversation,
   } = useChatStore()
-  const { openFile, addTerminalLine } = useEditorStore()
+  const { openFile } = useEditorStore()
   const { getActiveProvider, selectedModel, setSelectedModel } = useProviderStore()
-  const { getEnabledSkills, addSkillCall, updateSkillCall, activeSkillCalls } = useSkillStore()
+  const { getEnabledSkills } = useSkillStore()
 
   const activeConversation = getActiveConversation()
   const [mounted, setMounted] = useState(false)
-  const [popoverOpen, setPopoverOpen] = useState(false)
-  const [pendingConfirmation, setPendingConfirmation] = useState<{
-    toolName: string
-    input: Record<string, unknown>
-    callId: string
-  } | null>(null)
-  const pendingConfirmationRef = useRef<((approved: boolean) => void) | null>(null)
-  const [pendingQuestion, setPendingQuestion] = useState<{
-    question: string
-    options: string[]
-    callId: string
-  } | null>(null)
-  const pendingQuestionRef = useRef<((answer: string) => void) | null>(null)
-  const runningSkillCalls = mounted ? activeSkillCalls.filter((c) => c.status === 'running') : []
-
-  const handleConfirmApprove = useCallback(() => {
-    if (pendingConfirmationRef.current) {
-      pendingConfirmationRef.current(true)
-    }
-  }, [])
-
-  const handleConfirmReject = useCallback(() => {
-    if (pendingConfirmationRef.current) {
-      pendingConfirmationRef.current(false)
-    }
-  }, [])
 
   useEffect(() => {
     setMounted(true)
@@ -89,216 +50,8 @@ export function ChatPanel() {
     }
   }, [activeConversation?.messages])
 
-  const executeToolCall = useCallback(
-    async (toolName: string, input: Record<string, unknown>) => {
-      const skillId = toolToSkillIdMap[toolName] || toolName
-      const skill = AVAILABLE_SKILLS.find((s) => s.id === skillId)
-      const requiresConfirmation = skill?.requiresConfirmation ?? false
-
-      const callId = addSkillCall({
-        skillId,
-        skillName: toolName,
-        input: JSON.stringify(input),
-        status: requiresConfirmation ? 'awaiting-confirmation' : 'running',
-      })
-
-      if (requiresConfirmation) {
-        setPendingConfirmation({ toolName, input, callId })
-        const approved = await new Promise<boolean>((resolve) => {
-          pendingConfirmationRef.current = resolve
-        })
-        setPendingConfirmation(null)
-        pendingConfirmationRef.current = null
-
-        if (!approved) {
-          updateSkillCall(callId, {
-            status: 'error',
-            error: 'Operation rejected by the user.',
-            output: 'Operation rejected by the user.',
-          })
-          return 'Error: Operation rejected by the user.'
-        }
-
-        updateSkillCall(callId, { status: 'running' })
-      }
-
-      try {
-        if (toolName === 'ask_question') {
-          const question = (input.question as string) || ''
-          const options = (input.options as string[]) || []
-          setPendingQuestion({ question, options, callId })
-          
-          const answer = await new Promise<string>((resolve) => {
-            pendingQuestionRef.current = resolve
-          })
-          
-          setPendingQuestion(null)
-          pendingQuestionRef.current = null
-          
-          updateSkillCall(callId, {
-            status: 'completed',
-            output: `User answered: "${answer}"`,
-          })
-          return `User answered: "${answer}"`
-        }
-
-        if (toolName === 'start_subagent') {
-          const subagentName = (input.name as string) || 'subagent'
-          const subagentPrompt = (input.prompt as string) || ''
-          
-          updateSkillCall(callId, {
-            status: 'running',
-            output: `Spawning subagent [${subagentName}]...`
-          })
-          
-          const provider = getActiveProvider()
-          const enabledSkills = getEnabledSkills().map(s => s.id)
-          
-          const response = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              messages: [{ role: 'user', content: subagentPrompt }],
-              model: selectedModel,
-              provider,
-              enabledSkills,
-              systemPromptOverride: `You are a specialized subagent named "${subagentName}" working under the supervision of the main NaviCode agent.
-Your specific subtask instructions are: "${subagentPrompt}".
-Execute this task completely and output the final findings or code. Limit your output to direct conclusions/code files created.`
-            }),
-          })
-          
-          if (!response.ok) {
-            const errText = await response.text()
-            throw new Error(`HTTP error ${response.status}: ${errText}`)
-          }
-          
-          const reader = response.body?.getReader()
-          if (!reader) throw new Error('No streaming reader available')
-          
-          let resultText = ''
-          const decoder = new TextDecoder()
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            resultText += decoder.decode(value)
-          }
-          
-          updateSkillCall(callId, {
-            status: 'completed',
-            output: resultText,
-          })
-          return `Subagent [${subagentName}] completed task successfully. Output findings:\n${resultText}`
-        }
-
-        const cwd = useEditorStore.getState().getCwd();
-        const enrichedInput = { ...input, cwd };
-        
-        const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), 60000) // 60s timeout
-
-        const response = await fetch('/api/tools', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tool: toolName, input: enrichedInput }),
-          signal: controller.signal,
-        })
-        clearTimeout(timeoutId)
-
-        const result = await response.json()
-
-        if (result.success) {
-          updateSkillCall(callId, {
-            status: 'completed',
-            output: typeof result.output === 'string' ? result.output : JSON.stringify(result.output, null, 2),
-          })
-          return typeof result.output === 'string' ? result.output : JSON.stringify(result.output, null, 2)
-        } else {
-          updateSkillCall(callId, {
-            status: 'error',
-            error: result.error || 'Unknown error',
-            output: result.error || 'Unknown error',
-          })
-          return `Error: ${result.error}`
-        }
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : 'Unknown error'
-        updateSkillCall(callId, { status: 'error', error: msg, output: msg })
-        return `Error: ${msg}`
-      }
-    },
-    [addSkillCall, updateSkillCall, getActiveProvider, selectedModel, getEnabledSkills]
-  )
-
-  const extractAndExecuteTools = useCallback(
-    async (content: string, convId: string, messageId: string): Promise<string> => {
-      const toolRegex = /```(?:tool|json)?\s*\n([\s\S]*?)```/gi
-      let match
-      let newContent = content
-      const toolCalls: { original: string; tool?: string; input?: any; error?: string }[] = []
-
-      while ((match = toolRegex.exec(content)) !== null) {
-        const original = match[0]
-        const rawJson = match[1].trim()
-        try {
-          const toolCall = JSON.parse(rawJson)
-          if (toolCall && typeof toolCall === 'object' && 'tool' in toolCall && 'input' in toolCall) {
-            toolCalls.push({ original, tool: toolCall.tool, input: toolCall.input })
-          }
-        } catch (err) {
-          const isExplicitToolTag = original.toLowerCase().startsWith('```tool')
-          const looksLikeToolCall = rawJson.includes('"tool"') && rawJson.includes('"input"')
-
-          if (isExplicitToolTag || looksLikeToolCall) {
-            // Attempt to fix simple JSON formatting errors
-            try {
-              const cleaned = rawJson
-                .replace(/,\s*([\]}])/g, '$1') // Remove trailing commas
-                .replace(/'([^']*)'\s*:/g, '"$1":') // Replace single quotes in keys
-                .replace(/:\s*'([^']*)'/g, ':"$1"') // Replace single quotes in values
-              const toolCall = JSON.parse(cleaned)
-              if (toolCall && typeof toolCall === 'object' && 'tool' in toolCall && 'input' in toolCall) {
-                toolCalls.push({ original, tool: toolCall.tool, input: toolCall.input })
-                continue
-              }
-            } catch {}
-
-            const errMsg = err instanceof Error ? err.message : 'Unknown JSON parse error'
-            toolCalls.push({ original, error: `Invalid JSON format: ${errMsg}. Make sure to use double quotes and do not use trailing commas.` })
-          }
-        }
-      }
-
-      if (toolCalls.length > 0) {
-        // Execute sequentially to preserve order and prevent filesystem race conditions
-        for (const call of toolCalls) {
-          let result = ''
-          if (call.error) {
-            result = `Error: ${call.error}`
-          } else if (call.tool && call.input) {
-            result = await executeToolCall(call.tool, call.input)
-          }
-
-          newContent = newContent.replace(
-            call.original,
-            `\n\n**Tool Result:**\n\`\`\`\n${result}\n\`\`\`\n`
-          )
-        }
-        updateMessage(convId, messageId, { content: newContent })
-      }
-
-      return newContent
-    },
-    [executeToolCall, updateMessage]
-  )
-
   const executeAgentTurn = useCallback(
-    async (convId: string, depth = 0) => {
-      if (depth > 5) {
-        console.warn('Max agent loop depth reached')
-        return
-      }
-
+    async (convId: string) => {
       const assistantMessage: ChatMessage = {
         id: `msg-${Date.now()}-assistant`,
         role: 'assistant',
@@ -316,7 +69,7 @@ Execute this task completely and output the final findings or code. Limit your o
           .filter((m) => m.role !== 'system' && m.id !== assistantMessage.id && m.content.trim() !== '')
           .map((m) => ({ role: m.role, content: m.content })) || []
 
-        // Get provider config — force default apiKey for FCC proxy if empty
+        // Get provider config
         const activeProvider = getActiveProvider()
         const providerPayload = activeProvider && activeProvider.type !== 'builtin'
           ? {
@@ -334,7 +87,7 @@ Execute this task completely and output the final findings or code. Limit your o
         const enabledSkills = getEnabledSkills().map((s) => s.id)
 
         const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), 90000) // 90s timeout for chat completion
+        const timeoutId = setTimeout(() => controller.abort(), 120000)
 
         const response = await fetch('/api/chat', {
           method: 'POST',
@@ -371,16 +124,14 @@ Execute this task completely and output the final findings or code. Limit your o
           })
         }
 
-        // Execute any tool calls in the response
-        const processedContent = await extractAndExecuteTools(fullContent, convId, assistantMessage.id)
+        // Extract code blocks for open-in-editor feature
+        const codeBlocks = extractCodeBlocks(fullContent)
 
-        const codeBlocks = extractCodeBlocks(processedContent)
-
-        // Calculate tokens and cost metrics
+        // Estimate token usage
         const totalInputChars = messages.reduce((acc, m) => acc + m.content.length, 0)
         const tokensIn = Math.round(totalInputChars / 4)
-        const tokensOut = Math.round(processedContent.length / 4)
-        
+        const tokensOut = Math.round(fullContent.length / 4)
+
         let cost = 0
         const activeModel = selectedModel.toLowerCase()
         if (activeModel.includes('free') || activeModel.includes('owl-alpha')) {
@@ -396,20 +147,13 @@ Execute this task completely and output the final findings or code. Limit your o
         }
 
         updateMessage(convId, assistantMessage.id, {
-          content: processedContent,
+          content: fullContent,
           isStreaming: false,
           codeBlocks,
           tokensIn,
           tokensOut,
           cost,
         })
-
-        // If a tool call was executed (processedContent differs from fullContent), trigger the next turn
-        if (processedContent !== fullContent) {
-          // Add a short delay to feel natural
-          await new Promise((resolve) => setTimeout(resolve, 800))
-          await executeAgentTurn(convId, depth + 1)
-        }
       } catch (error) {
         console.error('Error in agent turn:', error)
         updateMessage(convId, assistantMessage.id, {
@@ -420,7 +164,7 @@ Execute this task completely and output the final findings or code. Limit your o
         setStreaming(false)
       }
     },
-    [selectedModel, addMessage, setStreaming, getActiveProvider, getEnabledSkills, updateMessage, extractAndExecuteTools]
+    [selectedModel, addMessage, setStreaming, getActiveProvider, getEnabledSkills, updateMessage]
   )
 
   const handleCostCommand = useCallback((convId: string) => {
@@ -434,7 +178,7 @@ Execute this task completely and output the final findings or code. Limit your o
       if (m.tokensOut) totalOut += m.tokensOut
       if (m.cost) totalCost += m.cost
     })
-    
+
     const costMessage: ChatMessage = {
       id: `msg-${Date.now()}-cost`,
       role: 'assistant',
@@ -458,17 +202,15 @@ Execute this task completely and output the final findings or code. Limit your o
       addMessage(convId, msg)
       return
     }
-    
+
     const numRemoved = conv.messages.length - 4
     const keptMessages = conv.messages.slice(-4)
-    
-    // Update the conversation's messages using the setMessages action
     useChatStore.getState().setMessages(convId, keptMessages)
-    
+
     const compactMessage: ChatMessage = {
       id: `msg-${Date.now()}-compact`,
       role: 'assistant',
-      content: `🧹 **Conversation compacted!** Removed ${numRemoved} messages from context to free up the active memory buffer. Only the last 4 messages are retained.`,
+      content: `🧹 **Conversation compacted!** Removed ${numRemoved} messages from context.`,
       timestamp: Date.now(),
       model: selectedModel,
     }
@@ -491,11 +233,10 @@ Execute this task completely and output the final findings or code. Limit your o
       }
       addMessage(convId, userMessage)
 
-      // Intercept local CLI client commands
       if (trimmed.startsWith('/')) {
         const parts = trimmed.split(' ')
         const command = parts[0].toLowerCase().slice(1)
-        
+
         if (command === 'cost') {
           handleCostCommand(convId)
           return
@@ -506,7 +247,7 @@ Execute this task completely and output the final findings or code. Limit your o
         }
       }
 
-      await executeAgentTurn(convId, 0)
+      await executeAgentTurn(convId)
     },
     [activeConversationId, createConversation, addMessage, executeAgentTurn, handleCostCommand, handleCompactCommand]
   )
@@ -528,44 +269,27 @@ Execute this task completely and output the final findings or code. Limit your o
       case 'new':
         createConversation()
         break
-      case 'clear': {
-        const conv = getActiveConversation()
-        if (conv && conv.messages.length > 0) {
-          // Find and clear messages
-          const msgs = [...conv.messages]
-          msgs.forEach(m => {
-            try { updateMessage(conv.id, m.id, { content: '' }) } catch {}
-          })
-          // Instead, just delete and recreate
-          deleteConversation(conv.id)
-          createConversation()
-        }
+      case 'clear':
+        deleteConversation(activeConversationId || '')
+        createConversation()
         break
-      }
-      case 'retry': {
+      case 'retry':
         const conv = getActiveConversation()
         if (!conv || isStreaming) break
-        const msgs = conv.messages
-        // Find the last assistant message
-        const lastAssistantIdx = msgs.length - 1
-        if (lastAssistantIdx < 0 || msgs[lastAssistantIdx].role !== 'assistant') break
-        // Find the user message before it
-        const lastUserMsg = [...msgs].reverse().find(m => m.role === 'user')
+        const lastUserMsg = [...conv.messages].reverse().find(m => m.role === 'user')
         if (!lastUserMsg) break
-        // Remove the assistant message
-        updateMessage(conv.id, msgs[lastAssistantIdx].id, { content: '' })
-        // Re-run the agent turn
-        await executeAgentTurn(conv.id, 0)
+        const lastAssistantMsgs = conv.messages.filter(m => m.role === 'assistant')
+        const lastAssistant = lastAssistantMsgs[lastAssistantMsgs.length - 1]
+        if (lastAssistant) {
+          updateMessage(conv.id, lastAssistant.id, { content: '' })
+        }
+        await executeAgentTurn(conv.id)
         break
-      }
       case 'help':
         handleSendMessage('/help')
         break
-      case 'settings':
-        handleSendMessage('/settings')
-        break
     }
-  }, [createConversation, deleteConversation, getActiveConversation, updateMessage, handleSendMessage, executeAgentTurn, isStreaming])
+  }, [createConversation, deleteConversation, getActiveConversation, updateMessage, handleSendMessage, executeAgentTurn, isStreaming, activeConversationId])
 
   const activeProvider = mounted ? getActiveProvider() : undefined
   const availableModels = activeProvider ? activeProvider.models : []
@@ -594,9 +318,9 @@ Execute this task completely and output the final findings or code. Limit your o
           <Sparkles className="h-4 w-4 text-primary" />
           <span className="font-semibold text-sm">NaviCode Chat</span>
           {mounted && (
-            <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+            <Popover>
               <PopoverTrigger asChild>
-                <button 
+                <button
                   className="flex items-center gap-1 text-xs text-muted-foreground bg-muted/60 hover:bg-muted hover:text-foreground px-2 py-0.5 rounded-full transition-colors font-medium border border-transparent hover:border-muted-foreground/10"
                   suppressHydrationWarning
                 >
@@ -619,7 +343,6 @@ Execute this task completely and output the final findings or code. Limit your o
                             value={model}
                             onSelect={(val) => {
                               setSelectedModel(val)
-                              setPopoverOpen(false)
                             }}
                             className="flex items-center justify-between text-xs cursor-pointer py-1.5 px-2"
                           >
@@ -677,7 +400,7 @@ Execute this task completely and output the final findings or code. Limit your o
         </div>
       )}
 
-      {/* Messages - wrapped in min-h-0 overflow-hidden to constrain ScrollArea */}
+      {/* Messages */}
       <div className="flex-1 min-h-0">
         <ScrollArea className="h-full">
           <div ref={scrollRef} className="p-4 space-y-4">
@@ -702,150 +425,12 @@ Execute this task completely and output the final findings or code. Limit your o
                 <span>Thinking...</span>
               </div>
             )}
-            {runningSkillCalls.map((call) => (
-              <div key={call.id} className="flex items-center gap-2 text-emerald-500 text-xs pl-11 py-1 animate-pulse">
-                <span className="animate-spin h-3 w-3 border-2 border-emerald-500 border-t-transparent rounded-full" />
-                <span>Running tool: <strong className="font-mono bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">{call.skillName}</strong>...</span>
-              </div>
-            ))}
           </div>
         </ScrollArea>
       </div>
 
-      {/* Confirmation Banner */}
-      {pendingConfirmation && (
-        <div className="border-t bg-amber-500/10 border-amber-500/20 p-4 animate-in fade-in slide-in-from-bottom-2 duration-200">
-          <div className="flex flex-col gap-3 max-w-3xl mx-auto">
-            <div className="flex items-center gap-2 text-amber-500">
-              <span className="text-lg">⚠️</span>
-              <span className="font-semibold text-sm">Aksi ini memerlukan konfirmasi Anda (Confirmation Required)</span>
-            </div>
-            <div className="bg-muted/50 rounded-lg p-3 border border-border/50 text-xs font-mono whitespace-pre-wrap max-h-40 overflow-y-auto">
-              <span className="text-muted-foreground">Tool:</span> <span className="text-foreground font-bold">{pendingConfirmation.toolName}</span>{"\n"}
-              <span className="text-muted-foreground">Parameter:</span>{"\n"}
-              {JSON.stringify(pendingConfirmation.input, null, 2)}
-            </div>
-            <div className="flex items-center gap-2 self-end">
-              <Button 
-                variant="outline" 
-                size="sm" 
-                onClick={() => handleConfirmReject()}
-                className="text-xs"
-              >
-                Reject (Tolak)
-              </Button>
-              <Button 
-                variant="default" 
-                size="sm" 
-                onClick={() => handleConfirmApprove()}
-                className="bg-amber-600 hover:bg-amber-700 text-white text-xs border-none animate-pulse"
-              >
-                Approve (Izinkan)
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Question Banner */}
-      {pendingQuestion && (
-        <div className="border-t bg-primary/10 border-primary/20 p-4 animate-in fade-in slide-in-from-bottom-2 duration-200">
-          <div className="flex flex-col gap-3 max-w-3xl mx-auto">
-            <div className="flex items-center gap-2 text-primary">
-              <span className="text-lg">❓</span>
-              <span className="font-semibold text-sm">Masukan Diperlukan (Feedback / Input Required)</span>
-            </div>
-            <div className="bg-muted/50 rounded-lg p-3 border border-border/50 text-sm font-medium text-foreground">
-              {pendingQuestion.question}
-            </div>
-            {pendingQuestion.options && pendingQuestion.options.length > 0 ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex flex-wrap gap-2">
-                  {pendingQuestion.options.map((opt) => (
-                    <Button
-                      key={opt}
-                      variant="outline"
-                      size="sm"
-                      className="text-xs"
-                      onClick={() => {
-                        if (pendingQuestionRef.current) {
-                          pendingQuestionRef.current(opt)
-                        }
-                      }}
-                    >
-                      {opt}
-                    </Button>
-                  ))}
-                </div>
-                <div className="flex gap-2 items-center mt-1 border-t pt-2">
-                  <input
-                    id="custom-answer-input"
-                    type="text"
-                    placeholder="Atau ketik jawaban Anda..."
-                    className="flex-1 bg-background border border-input rounded-md px-3 py-1 text-xs h-8 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        const val = e.currentTarget.value.trim()
-                        if (val && pendingQuestionRef.current) {
-                          pendingQuestionRef.current(val)
-                        }
-                      }
-                    }}
-                  />
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="h-8 text-xs px-3"
-                    onClick={() => {
-                      const inputEl = document.getElementById('custom-answer-input') as HTMLInputElement
-                      const val = inputEl?.value.trim()
-                      if (val && pendingQuestionRef.current) {
-                        pendingQuestionRef.current(val)
-                      }
-                    }}
-                  >
-                    Kirim Custom
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex gap-2 items-center">
-                <input
-                  id="custom-answer-input"
-                  type="text"
-                  placeholder="Ketik jawaban Anda di sini..."
-                  className="flex-1 bg-background border border-input rounded-md px-3 py-1 text-xs h-8 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      const val = e.currentTarget.value.trim()
-                      if (val && pendingQuestionRef.current) {
-                        pendingQuestionRef.current(val)
-                      }
-                    }
-                  }}
-                />
-                <Button
-                  variant="default"
-                  size="sm"
-                  className="h-8 text-xs px-3"
-                  onClick={() => {
-                    const inputEl = document.getElementById('custom-answer-input') as HTMLInputElement
-                    const val = inputEl?.value.trim()
-                    if (val && pendingQuestionRef.current) {
-                      pendingQuestionRef.current(val)
-                    }
-                  }}
-                >
-                  Kirim (Send)
-                </Button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Input */}
-      <ChatInput onSend={handleSendMessage} onCommand={handleCommand} disabled={isStreaming || !!pendingConfirmation || !!pendingQuestion} />
+      <ChatInput onSend={handleSendMessage} onCommand={handleCommand} disabled={isStreaming} />
     </div>
   )
 }
@@ -897,7 +482,6 @@ function extractCodeBlocks(content: string): CodeBlock[] {
   let match
   while ((match = regex.exec(content)) !== null) {
     const language = match[1] || 'text'
-    if (language === 'tool') continue // Skip tool blocks
     const code = match[2].trim()
     const filenameMatch = code.match(/\/\/\s*(?:filepath|file):\s*(.+)/)
     blocks.push({
@@ -912,23 +496,10 @@ function extractCodeBlocks(content: string): CodeBlock[] {
 
 function getExtension(language: string): string {
   const map: Record<string, string> = {
-    typescript: 'ts',
-    javascript: 'js',
-    tsx: 'tsx',
-    jsx: 'jsx',
-    python: 'py',
-    rust: 'rs',
-    go: 'go',
-    java: 'java',
-    css: 'css',
-    html: 'html',
-    json: 'json',
-    markdown: 'md',
-    sql: 'sql',
-    bash: 'sh',
-    shell: 'sh',
-    yaml: 'yml',
-    toml: 'toml',
+    typescript: 'ts', javascript: 'js', tsx: 'tsx', jsx: 'jsx',
+    python: 'py', rust: 'rs', go: 'go', java: 'java',
+    css: 'css', html: 'html', json: 'json', markdown: 'md',
+    sql: 'sql', bash: 'sh', shell: 'sh', yaml: 'yml', toml: 'toml',
   }
   return map[language] || language
 }

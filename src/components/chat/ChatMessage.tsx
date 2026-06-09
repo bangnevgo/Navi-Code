@@ -1,10 +1,10 @@
 'use client'
 
-import { useMemo, useState, useCallback, isValidElement } from 'react'
+import { useMemo, useState, useCallback, isValidElement, useEffect } from 'react'
 import type { ChatMessage as ChatMessageType, CodeBlock } from '@/stores/chat-store'
 import { useEditorStore } from '@/stores/editor-store'
 import { Button } from '@/components/ui/button'
-import { Copy, Code2, Check, User, Bot } from 'lucide-react'
+import { Copy, Code2, Check, User, Bot, Network, Eye, Code, Maximize2, Download } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -216,6 +216,9 @@ function MarkdownRender({
           const codeString = String(children).replace(/\n$/, '')
 
           if (match) {
+            if (match[1] === 'mermaid') {
+              return <MermaidRenderer code={codeString} />
+            }
             return (
               <CodeBlockRenderer
                 language={match[1]}
@@ -350,6 +353,219 @@ function CodeBlockRenderer({
       >
         {code}
       </SyntaxHighlighter>
+    </div>
+  )
+}
+
+function MermaidRenderer({ code }: { code: string }) {
+  const [activeTab, setActiveTab] = useState<'diagram' | 'code'>('diagram')
+  const [isZoomed, setIsZoomed] = useState(false)
+  const [loadError, setLoadError] = useState(false)
+  const [svgContent, setSvgContent] = useState<string>('')
+  const [loadingSvg, setLoadingSvg] = useState(false)
+
+  // Encode the mermaid code to UTF-8 safe base64
+  const base64Code = useMemo(() => {
+    try {
+      // Safe base64 encoding for UTF-8 in browser
+      const bytes = new TextEncoder().encode(code)
+      let binString = ''
+      for (let i = 0; i < bytes.length; i++) {
+        binString += String.fromCharCode(bytes[i])
+      }
+      return btoa(binString)
+    } catch (e) {
+      console.error('Base64 encoding error:', e)
+      return ''
+    }
+  }, [code])
+
+  const diagramUrl = base64Code ? `https://mermaid.ink/svg/${base64Code}` : ''
+
+  // Fetch SVG content on client side to avoid Safari img-SVG scaling bugs
+  useEffect(() => {
+    if (activeTab === 'diagram' && diagramUrl) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setLoadingSvg(true)
+      setLoadError(false)
+      fetch(diagramUrl)
+        .then((res) => {
+          if (!res.ok) throw new Error('Failed to fetch SVG')
+          return res.text()
+        })
+        .then((text) => {
+          if (text.includes('<svg')) {
+            setSvgContent(text)
+          } else {
+            throw new Error('Invalid SVG returned')
+          }
+        })
+        .catch((err) => {
+          console.error('Error loading Mermaid SVG:', err)
+          setLoadError(true)
+        })
+        .finally(() => {
+          setLoadingSvg(false)
+        })
+    }
+  }, [activeTab, diagramUrl])
+
+  const handleDownloadSVG = async () => {
+    if (!diagramUrl) return
+    try {
+      const response = await fetch(diagramUrl)
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `mermaid-diagram-${Date.now()}.svg`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      console.error('Download SVG failed:', e)
+    }
+  }
+
+  return (
+    <div className="my-3 rounded-lg overflow-hidden border bg-[#282c34]/95 text-white/90 shadow-md">
+      {/* Header */}
+      <div className="flex items-center justify-between px-3.5 py-2 bg-[#21252b] border-b border-white/5">
+        <div className="flex items-center gap-2">
+          <Network className="h-4 w-4 text-emerald-400" />
+          <span className="text-[11px] font-semibold tracking-wide uppercase text-white/70">Mermaid Diagram</span>
+        </div>
+        <div className="flex items-center gap-1 bg-[#1e2227] rounded-md p-0.5 border border-white/5">
+          <button
+            onClick={() => setActiveTab('diagram')}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
+              activeTab === 'diagram'
+                ? 'bg-emerald-500/20 text-emerald-400 font-semibold'
+                : 'text-white/40 hover:text-white/80'
+            }`}
+          >
+            <Eye className="h-3 w-3" />
+            Diagram
+          </button>
+          <button
+            onClick={() => setActiveTab('code')}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
+              activeTab === 'code'
+                ? 'bg-emerald-500/20 text-emerald-400 font-semibold'
+                : 'text-white/40 hover:text-white/80'
+            }`}
+          >
+            <Code className="h-3 w-3" />
+            Code
+          </button>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="relative min-h-[180px] flex flex-col items-center justify-center p-4 bg-slate-900/40">
+        {activeTab === 'diagram' ? (
+          <>
+            {loadingSvg ? (
+              <div className="text-center p-6 space-y-2">
+                <span className="animate-spin h-5 w-5 border-2 border-emerald-400 border-t-transparent rounded-full inline-block" />
+                <p className="text-xs text-white/60">Loading diagram...</p>
+              </div>
+            ) : loadError ? (
+              <div className="text-center p-6 space-y-2">
+                <span className="text-2xl">⚠️</span>
+                <p className="text-xs text-white/60">Gagal merender diagram. Pastikan sintaks Mermaid sudah benar.</p>
+                <button
+                  onClick={() => setActiveTab('code')}
+                  className="text-xs text-emerald-400 underline hover:text-emerald-300"
+                >
+                  Lihat Kode Sumber
+                </button>
+              </div>
+            ) : (
+              <div className="w-full flex flex-col items-center justify-center space-y-3">
+                {/* Visual SVG Container */}
+                <div className="relative group max-w-full overflow-hidden rounded bg-white p-4 shadow border border-white/10 flex items-center justify-center">
+                  <div
+                    className="max-w-full max-h-[350px] overflow-auto flex items-center justify-center cursor-zoom-in [&>svg]:max-w-full [&>svg]:h-auto [&>svg]:max-h-[330px]"
+                    dangerouslySetInnerHTML={{ __html: svgContent }}
+                    onClick={() => setIsZoomed(true)}
+                  />
+                  {/* Overlay Controls */}
+                  <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                    <button
+                      onClick={() => setIsZoomed(true)}
+                      className="p-1.5 bg-[#21252b]/90 hover:bg-[#282c34] text-white/80 hover:text-white rounded shadow-md transition-colors"
+                      title="Zoom Diagram"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={handleDownloadSVG}
+                      className="p-1.5 bg-[#21252b]/90 hover:bg-[#282c34] text-white/80 hover:text-white rounded shadow-md transition-colors"
+                      title="Unduh SVG"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+                <span className="text-[10px] text-white/40">Klik diagram untuk memperbesar atau klik kanan untuk simpan gambar</span>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="w-full bg-[#282c34] rounded overflow-hidden text-left">
+            <SyntaxHighlighter
+              language="mermaid"
+              style={oneDark}
+              customStyle={{
+                margin: 0,
+                padding: '12px 16px',
+                fontSize: '12px',
+                lineHeight: '1.5',
+                background: 'transparent',
+                overflowX: 'auto',
+              }}
+              codeTagProps={{
+                style: { fontFamily: 'var(--font-geist-mono), monospace' },
+              }}
+            >
+              {code}
+            </SyntaxHighlighter>
+          </div>
+        )}
+      </div>
+
+      {/* Fullscreen Zoomed Dialog */}
+      {isZoomed && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4 cursor-zoom-out animate-in fade-in duration-200"
+          onClick={() => setIsZoomed(false)}
+        >
+          <div className="relative max-w-[90vw] max-h-[90vh] bg-white p-6 rounded-lg shadow-2xl flex items-center justify-center cursor-default" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setIsZoomed(false)}
+              className="absolute top-2 right-2 p-1.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors shadow-sm"
+              title="Close"
+            >
+              ✕
+            </button>
+            <div
+              className="w-full max-w-full max-h-[80vh] overflow-auto flex items-center justify-center [&>svg]:max-w-full [&>svg]:max-h-[75vh] [&>svg]:h-auto [&>svg]:w-auto"
+              dangerouslySetInnerHTML={{ __html: svgContent }}
+            />
+            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-2">
+              <button
+                onClick={handleDownloadSVG}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs shadow-md transition-colors"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Unduh SVG
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

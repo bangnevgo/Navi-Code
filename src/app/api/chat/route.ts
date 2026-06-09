@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import ZAI from 'z-ai-web-dev-sdk'
+import { executeTool } from '@/lib/tool-executor'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,6 +10,16 @@ interface ChatMessageInput {
 }
 
 type ApiFormat = 'openai' | 'anthropic' | 'builtin'
+
+interface ProviderInfo {
+  id: string
+  name: string
+  baseUrl: string
+  apiKey: string
+  type: 'builtin' | 'custom'
+  headers?: Record<string, string>
+  apiFormat?: ApiFormat
+}
 
 /** Detect whether a provider is the Free Claude Code proxy */
 function isFccProxy(name: string | undefined, baseUrl: string | undefined): boolean {
@@ -22,6 +33,131 @@ function isFccProxy(name: string | undefined, baseUrl: string | undefined): bool
   )
 }
 
+function detectApiFormat(name: string, baseUrl: string): ApiFormat {
+  const nameLower = name.toLowerCase()
+  const urlLower = baseUrl.toLowerCase()
+
+  if (
+    nameLower.includes('anthropic') ||
+    nameLower.includes('free-claude') ||
+    nameLower.includes('fcc') ||
+    nameLower.includes('free claude') ||
+    urlLower.includes('anthropic') ||
+    urlLower.includes(':8082') ||
+    urlLower.includes('wafer') ||
+    urlLower.includes('moonshot') ||
+    urlLower.includes('fireworks')
+  ) {
+    return 'anthropic'
+  }
+
+  return 'openai'
+}
+
+// ──────────────────────────────────────────
+// Tool extraction from AI response text
+// ──────────────────────────────────────────
+
+interface ToolCall {
+  tool: string
+  input: Record<string, unknown>
+}
+
+function extractToolCalls(text: string): ToolCall[] {
+  const calls: ToolCall[] = []
+  const regex = /```(?:tool|json)?\s*\n({[\s\S]*?})\n```/g
+  let match
+  while ((match = regex.exec(text)) !== null) {
+    try {
+      const parsed = JSON.parse(match[1])
+      if (parsed && typeof parsed === 'object' && 'tool' in parsed && 'input' in parsed) {
+        calls.push({ tool: parsed.tool, input: parsed.input as Record<string, unknown> })
+      }
+    } catch {
+      // Not valid JSON — skip
+    }
+  }
+  return calls
+}
+
+// ──────────────────────────────────────────
+// Stream a plain text string as a Response
+// ──────────────────────────────────────────
+
+function streamTextResponse(text: string): Response {
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(text))
+      controller.close()
+    },
+  })
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    },
+  })
+}
+
+// ──────────────────────────────────────────
+// Server-side tool loop
+// Makes streaming AI calls, collects text,
+// checks for tool blocks, executes tools,
+// repeats until no more tools, then streams
+// the final text.
+// ──────────────────────────────────────────
+
+const TOOLS_THAT_NEED_USER = new Set(['ask_question', 'start_subagent'])
+const MAX_TOOL_DEPTH = 10
+
+async function runToolLoop(
+  callAI: (msgs: { role: string; content: string }[]) => Promise<string>,
+  initialMessages: { role: string; content: string }[],
+): Promise<Response> {
+  const messages = [...initialMessages]
+
+  for (let depth = 0; depth < MAX_TOOL_DEPTH; depth++) {
+    const text = await callAI(messages)
+    const toolCalls = extractToolCalls(text)
+
+    // No tools → this is the final response
+    if (toolCalls.length === 0) {
+      return streamTextResponse(text)
+    }
+
+    // Execute each tool and append results
+    for (const call of toolCalls) {
+      // Tools that need frontend interaction: let the AI handle them in natural language
+      if (TOOLS_THAT_NEED_USER.has(call.tool)) {
+        // Strip the tool block from the text and stream as-is
+        const cleaned = text.replace(/```(?:tool|json)?\s*\n\{[\s\S]*?\}\n```/g, '').trim()
+        return streamTextResponse(cleaned || `I need to ask you something: ${JSON.stringify(call.input)}`)
+      }
+
+      let result: string
+      try {
+        result = await executeTool(call.tool, call.input)
+      } catch (err) {
+        result = `Error: ${err instanceof Error ? err.message : 'Unknown error'}`
+      }
+
+      // Append assistant's response and tool result for the next AI turn
+      messages.push(
+        { role: 'assistant', content: text },
+        { role: 'user', content: `[Tool result for "${call.tool}"]:\n${result}\n\nContinue your response based on the tool result above.` },
+      )
+    }
+  }
+
+  return streamTextResponse('Tool execution loop reached maximum depth. Please try again with a simpler request.')
+}
+
+// ──────────────────────────────────────────
+// POST handler
+// ──────────────────────────────────────────
+
 export async function POST(request: NextRequest) {
   try {
     const {
@@ -33,18 +169,12 @@ export async function POST(request: NextRequest) {
     }: {
       messages: ChatMessageInput[]
       model: string
-      provider?: {
-        id: string
-        name: string
-        baseUrl: string
-        apiKey: string
-        type: 'builtin' | 'custom'
-        headers?: Record<string, string>
-        apiFormat?: ApiFormat
-      }
+      provider?: ProviderInfo
       enabledSkills?: string[]
       systemPromptOverride?: string
     } = await request.json()
+
+    console.log(`[Chat API] model="${model}" provider="${provider?.name || 'builtin'}" skills=${enabledSkills?.length || 0}`)
 
     // Expand slash commands into agent workflows
     if (messages && messages.length > 0) {
@@ -80,14 +210,17 @@ ${args ? `Use this description as the basis for the commit message: "${args}"` :
       }
     }
 
-    // Build skills context
-    const skillsContext = enabledSkills?.length
-      ? `\n\nYou have access to the following tools/skills that you can invoke by responding with special JSON blocks:\n\n${enabledSkills
+    // Build skills context — exclude tools that need frontend interaction
+    const serverSkills = (enabledSkills || []).filter((s) => !TOOLS_THAT_NEED_USER.has(s))
+    const skillsContext = serverSkills.length
+      ? `\n\nYou have access to the following tools that you can invoke by responding with a JSON block:\n\n${serverSkills
           .map((s) => `- ${s.replace(/-/g, '_')}`)
-          .join('\n')}\n\nTo use a tool, respond with a JSON block in this format:\n\`\`\`tool\n{"tool": "tool-name", "input": {"key": "value"}}\n\`\`\`\n\nAvailable tools:\n- \`file_read\`: Read a file. Input: {"path": "/path/to/file"}\n- \`file_write\`: Write/create a file. Input: {"path": "/path/to/file", "content": "file content"}\n- \`file_list\`: List directory contents. Input: {"path": "/path/to/dir"}\n- \`file_delete\`: Delete a file. Input: {"path": "/path/to/file"}\n- \`file_search\`: Search files by name/content. Input: {"query": "search term", "path": "/search/dir"}\n- \`terminal_exec\`: Execute a terminal command. Input: {"command": "shell command", "cwd": "/working/dir"}. Note: changing directories via "cd" does not persist across separate calls. Chain commands with "&&" (e.g. "cd dir && command") or pass the "cwd" parameter.\n- \`web_search\`: Search the web. Input: {"query": "search query"}\n- \`web_scrape\`: Scrape a web page. Input: {"url": "https://example.com"}\n- \`system_info\`: Get system information. Input: {}\n- \`ask_question\`: Ask the user a clarifying question or request feedback. Input: {"question": "Question text to present", "options": ["Option A", "Option B"]} (options array is optional; omit for write-in open responses).\n- \`start_subagent\`: Spawn a specialized subagent in the background to execute a task. Input: {"name": "subagent_name", "prompt": "specific prompt/instructions for the subagent"}.\n\nWhen you need to use a tool, output ONLY the JSON block and STOP generating further text immediately. Do not write anything after the tool block. The user's system will automatically execute the tool, display the result to you in the next message, and trigger your next response. You can then write your explanation or call another tool based on the real tool output.\n\nIMPORTANT: For file operations and terminal commands, always confirm with the user before executing destructive operations (delete, overwrite).`
+          .join('\n')}\n\nTo use a tool, respond with a JSON block in this format:\n\`\`\`tool\n{"tool": "tool-name", "input": {"key": "value"}}\n\`\`\`\n\nAvailable tools:\n- \`file_read\`: Read a file. Input: {"path": "/path/to/file"}\n- \`file_write\`: Write/create a file. Input: {"path": "/path/to/file", "content": "file content"}\n- \`file_list\`: List directory contents. Input: {"path": "/path/to/dir"}\n- \`file_delete\`: Delete a file. Input: {"path": "/path/to/file"}\n- \`file_search\`: Search files by name/content. Input: {"query": "search term", "path": "/search/dir"}\n- \`terminal_exec\`: Execute a terminal command. Input: {"command": "shell command", "cwd": "/working/dir"}. Note: changing directories via "cd" does not persist across separate calls. Chain commands with "&&" (e.g. "cd dir && command") or pass the "cwd" parameter.\n- \`web_search\`: Search the web. Input: {"query": "search query"}\n- \`web_scrape\`: Scrape a web page. Input: {"url": "https://example.com"}\n- \`system_info\`: Get system information. Input: {}\n- \`file_download\`: Download a file from a URL. Input: {"url": "https://example.com/file", "path": "local/path/to/save"}\n- \`http_client\`: Send HTTP requests (GET, POST, etc.) to endpoints. Input: {"url": "https://api.example.com", "method": "GET", "headers": {"Content-Type": "application/json"}, "body": {}}\n- \`db_query\`: Execute queries on a SQLite database. Input: {"query": "SELECT * FROM User LIMIT 5", "db_path": "db/custom.db"}.\n\nWhen you need to use a tool, output the JSON block inside \`\`\`tool\`\`\` fences. The system will automatically execute the tool and deliver the result to you in the next turn, so you can continue your response normally. You may output text before or after the tool block.\n\nIMPORTANT: For destructive operations (delete, overwrite, rm commands, etc.), first ask the user for permission in natural language and wait for their confirmation before executing.`
       : ''
 
-    const systemPrompt = systemPromptOverride || `You are NaviCode, an elite, autonomous AI coding agent mirroring the capabilities, rigor, and behaviors of Claude Code. You operate in a stateful multi-turn tool-use loop to research, edit, test, and verify code directly on the user's workspace.
+    const systemPrompt = systemPromptOverride
+      ? `${systemPromptOverride}\n${skillsContext}`
+      : `You are NaviCode, an elite, autonomous AI coding agent mirroring the capabilities, rigor, and behaviors of Claude Code. You operate in a stateful multi-turn tool-use loop to research, edit, test, and verify code directly on the user's workspace.
 
 ### Core Mission & Capabilities
 1. **Autonomous Execution**: You do not just describe changes; you perform them using the available filesystem and terminal tools. You break down complex requests into incremental steps and verify each step.
@@ -98,31 +231,29 @@ ${args ? `Use this description as the basis for the commit message: "${args}"` :
    - You apply code edits, then run tests/compilation again. If errors are encountered, you read the compiler/test logs, fix the code, and re-run verification until all checks pass.
 4. **Filesystem Integrity**: You read, write, search, and delete files on the local filesystem. You preserve existing comment blocks, documentation, styling, and imports unless explicitly told to change them.
 5. **Stateful Shell Operations**: You run shell commands. Remember that shell environments do not persist directories across separate \`terminal_exec\` calls; you chain commands using \`&&\` (e.g., \`cd path && command\`) or use the \`cwd\` parameter.
-6. **Linguistic & Workspace Adaptability**: In Indonesian, terms like "direktori utama", "folder utama", or "root" can refer to the project workspace root, the user's home directory (~), or the OS root (/). When tasked to find or inspect files in these directories, systematically check all three locations to ensure you find the correct path.
+6. **No Guessing File Paths**: Never invent or hallucinate file directory listings, file contents, or user home paths. If you don't have the real filesystem data, use the available tools to get it. If tools are not available, state that you cannot inspect the filesystem rather than making up paths or directory structures.
 
-### Guidelines for Tool Use & Formatting
-- **STOP Protocol**: To run a tool, you output ONLY the JSON block inside the \`\`\`tool\`\`\` markdown block and STOP generating text immediately. Do not write text before or after the tool block. Wait for the system to execute the tool and feed the result into your context in the next turn.
-- **Code Block Formatting**: Always use standard markdown code blocks with the language tag. Include a filename comment at the top (e.g., \`// filepath: src/app/page.tsx\`).
-- **Production-Quality Code**: Write clean, modern, type-safe, and robust code with comprehensive error handling. Never use mock placeholders or ellipses (\`// ...\`) in modified files; always return the complete updated content.
-- **No Hallucinated Results**: Never invent or hallucinate tool outputs. Always call the tool and let the client execute it.
+### Code Formatting
+- Use standard markdown code blocks with the language tag. Include a filename comment at the top (e.g., \`// filepath: src/app/page.tsx\`).
+- Write clean, modern, type-safe code with comprehensive error handling. Never use mock placeholders or ellipses (\`// ...\`) in modified files; always return the complete updated content.
 
 ${skillsContext}
 You are running inside a modern IDE-like web interface called NaviCode. The user can see their project files, active terminal, and editor directly. Your terminal runs in ${process.platform === 'win32' ? 'cmd.exe' : 'zsh'}.`
 
-    // Determine API format
     const apiFormat: ApiFormat = provider?.apiFormat || detectApiFormat(provider?.name || '', provider?.baseUrl || '')
 
-    // If using built-in provider, use z-ai-web-dev-sdk
+    // Built-in provider (no tool loop)
     if (!provider || provider.type === 'builtin' || !provider.baseUrl || !provider.apiKey) {
       return handleBuiltinProvider(allMessages(systemPrompt, messages), model)
     }
 
-    // Route to correct handler based on API format
+    // Anthropic provider (with optional tool loop)
     if (apiFormat === 'anthropic') {
-      return handleAnthropicProvider(provider, model, systemPrompt, messages)
+      return handleAnthropicProvider(provider, model, systemPrompt, messages, serverSkills)
     }
 
-    return handleOpenAIProvider(provider, model, allMessages(systemPrompt, messages))
+    // OpenAI provider (with optional tool loop)
+    return handleOpenAIProvider(provider, model, systemPrompt, messages, serverSkills)
   } catch (error) {
     console.error('Chat API error:', error)
     const message = error instanceof Error ? error.message : 'Unknown error'
@@ -136,7 +267,6 @@ function allMessages(systemPrompt: string, messages: ChatMessageInput[]) {
     content: m.content,
   }))
 
-  // Prepend system prompt to the first user message as a fallback/reinforcement
   if (normalizedMessages.length > 0 && normalizedMessages[0].role === 'user') {
     normalizedMessages[0] = {
       ...normalizedMessages[0],
@@ -150,31 +280,10 @@ function allMessages(systemPrompt: string, messages: ChatMessageInput[]) {
   ]
 }
 
-function detectApiFormat(name: string, baseUrl: string): ApiFormat {
-  const nameLower = name.toLowerCase()
-  const urlLower = baseUrl.toLowerCase()
-
-  // Anthropic Messages API format providers
-  if (
-    nameLower.includes('anthropic') ||
-    nameLower.includes('free-claude') ||
-    nameLower.includes('fcc') ||
-    nameLower.includes('free claude') ||
-    urlLower.includes('anthropic') ||
-    urlLower.includes(':8082') ||
-    urlLower.includes('wafer') ||
-    urlLower.includes('moonshot') ||
-    urlLower.includes('fireworks')
-  ) {
-    return 'anthropic'
-  }
-
-  return 'openai'
-}
-
 // ──────────────────────────────────────────
 // Built-in provider (z-ai-web-dev-sdk)
 // ──────────────────────────────────────────
+
 async function handleBuiltinProvider(
   messages: { role: string; content: string }[],
   model: string
@@ -216,22 +325,16 @@ async function handleBuiltinProvider(
 // ──────────────────────────────────────────
 // OpenAI Chat Completions format
 // ──────────────────────────────────────────
-interface ProviderInfo {
-  id: string
-  name: string
-  baseUrl: string
-  apiKey: string
-  type: 'builtin' | 'custom'
-  headers?: Record<string, string>
-  apiFormat?: ApiFormat
-}
 
 async function handleOpenAIProvider(
   provider: ProviderInfo,
   model: string,
-  messages: { role: string; content: string }[]
+  systemPrompt: string,
+  messages: ChatMessageInput[],
+  enabledSkills: string[],
 ) {
   const baseUrl = (provider.baseUrl || '').replace(/\/$/, '')
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${provider.apiKey}`,
@@ -243,25 +346,82 @@ async function handleOpenAIProvider(
     headers['X-Title'] = 'NaviCode AI Assistant'
   }
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: true,
-    }),
-  })
+  // Prepare messages with system prompt
+  const openaiMessages = allMessages(systemPrompt, messages)
 
-  if (!response.ok) {
-    const errorText = await response.text()
-    return NextResponse.json(
-      { error: `Provider API error (${response.status}): ${errorText}` },
-      { status: response.status }
-    )
+  // No skills → simple streaming (keep old behavior)
+  if (enabledSkills.length === 0) {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model, messages: openaiMessages, stream: true }),
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      return NextResponse.json(
+        { error: `Provider API error (${response.status}): ${errorText}` },
+        { status: response.status }
+      )
+    }
+
+    return proxyOpenAIStream(response)
   }
 
-  return proxyOpenAIStream(response)
+  // Skills enabled → run tool loop
+  return runToolLoop(
+    async (msgs) => {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ model, messages: msgs, stream: true }),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`Provider API error (${response.status}): ${errorText}`)
+      }
+
+      return collectOpenAIText(response)
+    },
+    openaiMessages,
+  )
+}
+
+async function collectOpenAIText(response: Response): Promise<string> {
+  const decoder = new TextDecoder()
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('No reader available')
+
+  let buffer = ''
+  let fullText = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed === 'data: [DONE]') continue
+      if (!trimmed.startsWith('data: ')) continue
+
+      try {
+        const json = JSON.parse(trimmed.slice(6))
+        const content = json.choices?.[0]?.delta?.content
+        if (content) {
+          fullText += content
+        }
+      } catch {
+        // Skip malformed JSON
+      }
+    }
+  }
+
+  return fullText
 }
 
 function proxyOpenAIStream(response: Response): Response {
@@ -271,10 +431,7 @@ function proxyOpenAIStream(response: Response): Response {
     async start(controller) {
       try {
         const reader = response.body?.getReader()
-        if (!reader) {
-          controller.error(new Error('No reader available'))
-          return
-        }
+        if (!reader) { controller.error(new Error('No reader available')); return }
 
         let buffer = ''
         while (true) {
@@ -296,9 +453,7 @@ function proxyOpenAIStream(response: Response): Response {
               if (content) {
                 controller.enqueue(encoder.encode(content))
               }
-            } catch {
-              // Skip malformed JSON
-            }
+            } catch { /* skip */ }
           }
         }
         controller.close()
@@ -320,14 +475,14 @@ function proxyOpenAIStream(response: Response): Response {
 
 // ──────────────────────────────────────────
 // Anthropic Messages API format
-// Used by: Free Claude Code proxy, Anthropic direct,
-//          Wafer, Kimi/Moonshot, Fireworks, Z.ai
 // ──────────────────────────────────────────
+
 async function handleAnthropicProvider(
   provider: ProviderInfo,
   model: string,
   systemPrompt: string,
-  messages: ChatMessageInput[]
+  messages: ChatMessageInput[],
+  enabledSkills: string[],
 ) {
   const baseUrl = (provider.baseUrl || '').replace(/\/$/, '')
   const fcc = isFccProxy(provider.name, baseUrl)
@@ -340,53 +495,20 @@ async function handleAnthropicProvider(
     ...provider.headers,
   }
 
-  // For FCC proxy and other Anthropic proxies, also set Bearer auth
-  // since some proxies accept both formats. FCC proxy prefers x-api-key.
   if (!headers['Authorization']) {
     headers['Authorization'] = `Bearer ${apiKey}`
   }
 
-  // Convert messages to Anthropic format
-  // Anthropic uses: system (separate), user, assistant
-  const anthropicMessages = messages
-    .filter((m) => m.role !== 'system')
-    .map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    }))
+  // Build anthropic messages (filter system role, inject system prompt into first user message)
+  const anthropicMessages = buildAnthropicMessages(messages, systemPrompt)
 
-  // Prepend system prompt to the first user message as a fallback/reinforcement
-  // to ensure proxies/providers that strip or ignore the system prompt field still receive it.
-  if (anthropicMessages.length > 0 && anthropicMessages[0].role === 'user') {
-    anthropicMessages[0] = {
-      ...anthropicMessages[0],
-      content: `[System Instruction: ${systemPrompt}]\n\n${anthropicMessages[0].content}`
-    }
-  }
-
-  // Determine the model to send
-  // FCC proxy expects the full slug with provider prefix (e.g., "nvidia_nim/model")
-  // Other Anthropic-compatible providers use the model name directly
   const modelToUse = model
 
-  // Determine max tokens based on provider and model
-  // - FCC proxy routes to various models, some of which support very long outputs
-  // - Direct Anthropic Claude models: 8192 default, up to 32768 for extended
-  // - Other providers: 4096 conservative default
   let maxTokens: number
-  if (fcc) {
-    // FCC proxy: use higher limit since it routes to various models
-    // that may support longer outputs
-    maxTokens = 16384
-  } else if (modelToUse.includes('claude')) {
-    // Direct Anthropic Claude models
-    maxTokens = 8192
-  } else {
-    // Other Anthropic-compatible providers
-    maxTokens = 4096
-  }
+  if (fcc) maxTokens = 16384
+  else if (modelToUse.includes('claude')) maxTokens = 8192
+  else maxTokens = 4096
 
-  // Build request body
   const body: Record<string, unknown> = {
     model: modelToUse,
     max_tokens: maxTokens,
@@ -395,69 +517,126 @@ async function handleAnthropicProvider(
     stream: true,
   }
 
-  // Support thinking/extended thinking for Claude models via FCC or direct Anthropic
-  // This enables Claude's reasoning mode when the model supports it
   if (modelToUse.includes('claude') && (fcc || baseUrl.includes('anthropic.com'))) {
-    body.thinking = {
-      type: 'enabled',
-      budget_tokens: Math.min(maxTokens, 10000),
+    body.thinking = { type: 'enabled', budget_tokens: Math.min(maxTokens, 10000) }
+  }
+
+  // No skills → simple streaming (keep old behavior)
+  if (enabledSkills.length === 0) {
+    const response = await makeAnthropicRequest(baseUrl, headers, body, fcc)
+    if (!response.ok) return handleAnthropicError(response, fcc, provider, modelToUse)
+    return proxyAnthropicStream(response)
+  }
+
+  // Skills enabled → run tool loop
+  return runToolLoop(
+    async (msgs) => {
+      const loopBody = {
+        ...body,
+        messages: msgs,
+        system: systemPrompt,
+      }
+      const response = await makeAnthropicRequest(baseUrl, headers, loopBody, fcc)
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`Anthropic API error (${response.status}): ${errorText}`)
+      }
+      return collectAnthropicText(response)
+    },
+    anthropicMessages,
+  )
+}
+
+function buildAnthropicMessages(messages: ChatMessageInput[], systemPrompt: string) {
+  const msgs = messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+
+  if (msgs.length > 0 && msgs[0].role === 'user') {
+    msgs[0] = {
+      ...msgs[0],
+      content: `[System Instruction: ${systemPrompt}]\n\n${msgs[0].content}`
     }
   }
 
-  let response: Response
+  return msgs
+}
+
+async function makeAnthropicRequest(baseUrl: string, headers: Record<string, string>, body: Record<string, unknown>, fcc: boolean): Promise<Response> {
   try {
-    response = await fetch(`${baseUrl}/v1/messages`, {
+    return await fetch(`${baseUrl}/v1/messages`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
     })
   } catch (fetchError) {
-    // Handle connection errors (proxy not running, network issues, etc.)
     const errMsg = fetchError instanceof Error ? fetchError.message : 'Unknown connection error'
     if (fcc) {
-      return NextResponse.json(
-        {
-          error: `Cannot connect to FCC proxy at ${baseUrl}. Make sure fcc-server is running. Install it with: curl -fsSL "https://github.com/Alishahryar1/free-claude-code/blob/main/scripts/install.sh?raw=1" | sh — then run: fcc-server`,
-        },
-        { status: 502 }
-      )
+      throw new Error(`Cannot connect to FCC proxy at ${baseUrl}. Make sure fcc-server is running. Install it with: curl -fsSL "https://github.com/Alishahryar1/free-claude-code/blob/main/scripts/install.sh?raw=1" | sh — then run: fcc-server`)
     }
-    return NextResponse.json(
-      { error: `Connection error: ${errMsg}. Check that the provider is accessible at ${baseUrl}.` },
-      { status: 502 }
-    )
+    throw new Error(`Connection error: ${errMsg}. Check that the provider is accessible at ${baseUrl}.`)
+  }
+}
+
+async function handleAnthropicError(response: Response, fcc: boolean, provider: ProviderInfo, modelToUse: string): Promise<Response> {
+  const errorText = await response.text()
+  let errorMessage = `Anthropic API error (${response.status}): ${errorText}`
+
+  if (fcc) {
+    if (response.status === 401 || response.status === 403) {
+      errorMessage = `Authentication failed for FCC proxy. Check that your auth token is correct (default: "freecc").`
+    } else if (response.status === 404) {
+      errorMessage = `FCC proxy returned 404. The model "${modelToUse}" may not be available.`
+    } else if (response.status === 500 || response.status === 502 || response.status === 503) {
+      errorMessage = `FCC proxy server error (${response.status}). The upstream provider may be unavailable.`
+    } else if (response.status === 429) {
+      errorMessage = `Rate limited by FCC proxy or upstream provider. Wait a moment and try again.`
+    }
+  } else {
+    if (response.status === 401 || response.status === 403) {
+      errorMessage = `Authentication failed. Check your API key for the ${provider.name || 'provider'}.`
+    } else if (response.status === 404) {
+      errorMessage = `Model "${modelToUse}" not found on ${provider.name || 'provider'}.`
+    }
   }
 
-  if (!response.ok) {
-    const errorText = await response.text()
-    let errorMessage = `Anthropic API error (${response.status}): ${errorText}`
+  return NextResponse.json({ error: errorMessage }, { status: response.status })
+}
 
-    // Provide more helpful error messages for common FCC proxy issues
-    if (fcc) {
-      if (response.status === 401 || response.status === 403) {
-        errorMessage = `Authentication failed for FCC proxy. Check that your auth token is correct (default: "freecc"). Set it via ANTHROPIC_AUTH_TOKEN env var when starting fcc-server.`
-      } else if (response.status === 404) {
-        errorMessage = `FCC proxy returned 404. The model "${modelToUse}" may not be available. Check available models at http://localhost:8082/admin or try fetching models in Settings.`
-      } else if (response.status === 500 || response.status === 502 || response.status === 503) {
-        errorMessage = `FCC proxy server error (${response.status}). The upstream provider may be unavailable, or the API key for that provider may not be set. Open the admin UI at http://localhost:8082/admin to configure provider API keys.`
-      } else if (response.status === 429) {
-        errorMessage = `Rate limited by FCC proxy or upstream provider. Wait a moment and try again.`
-      }
-    } else {
-      if (response.status === 401 || response.status === 403) {
-        errorMessage = `Authentication failed. Check your API key for the ${provider.name || 'provider'}.`
-      } else if (response.status === 404) {
-        errorMessage = `Model "${modelToUse}" not found. Check that the model is available on this provider.`
-      }
+async function collectAnthropicText(response: Response): Promise<string> {
+  const decoder = new TextDecoder()
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('No reader available')
+
+  let buffer = ''
+  let fullText = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed || !trimmed.startsWith('data: ')) continue
+
+      try {
+        const json = JSON.parse(trimmed.slice(6))
+        if (json.type === 'content_block_delta') {
+          const text = json.delta?.text
+          if (text) fullText += text
+        } else if (json.type === 'error') {
+          // propagate error text into the result so the AI sees it
+          fullText += `\n[API Error: ${json.error?.message || JSON.stringify(json.error)}]`
+        }
+      } catch { /* skip */ }
     }
-
-    return NextResponse.json(
-      { error: errorMessage },
-      { status: response.status }
-    )
   }
 
-  return proxyAnthropicStream(response)
+  return fullText
 }
 
 function proxyAnthropicStream(response: Response): Response {
@@ -467,10 +646,7 @@ function proxyAnthropicStream(response: Response): Response {
     async start(controller) {
       try {
         const reader = response.body?.getReader()
-        if (!reader) {
-          controller.error(new Error('No reader available'))
-          return
-        }
+        if (!reader) { controller.error(new Error('No reader available')); return }
 
         let buffer = ''
         let isInThinkingBlock = false
@@ -487,23 +663,18 @@ function proxyAnthropicStream(response: Response): Response {
             const trimmed = line.trim()
             if (!trimmed || !trimmed.startsWith('data: ')) continue
 
-            const data = trimmed.slice(6)
-
             try {
-              const json = JSON.parse(data)
+              const json = JSON.parse(trimmed.slice(6))
 
-              // Anthropic SSE event types
               if (json.type === 'content_block_delta') {
                 const text = json.delta?.text
                 if (text) {
-                  // If we were in a thinking block, close it before outputting text
                   if (isInThinkingBlock) {
                     controller.enqueue(encoder.encode('\n</thinking>\n\n'))
                     isInThinkingBlock = false
                   }
                   controller.enqueue(encoder.encode(text))
                 }
-                // Handle thinking delta within content blocks
                 const thinking = json.delta?.thinking
                 if (thinking) {
                   if (!isInThinkingBlock) {
@@ -512,9 +683,7 @@ function proxyAnthropicStream(response: Response): Response {
                   }
                   controller.enqueue(encoder.encode(thinking))
                 }
-              }
-              // Handle thinking blocks (for Claude extended thinking)
-              else if (json.type === 'thinking_delta') {
+              } else if (json.type === 'thinking_delta') {
                 const thinking = json.delta?.thinking
                 if (thinking) {
                   if (!isInThinkingBlock) {
@@ -523,9 +692,7 @@ function proxyAnthropicStream(response: Response): Response {
                   }
                   controller.enqueue(encoder.encode(thinking))
                 }
-              }
-              // Handle content block start (may indicate thinking block)
-              else if (json.type === 'content_block_start') {
+              } else if (json.type === 'content_block_start') {
                 if (json.content_block?.type === 'thinking') {
                   if (!isInThinkingBlock) {
                     controller.enqueue(encoder.encode('<thinking>\n'))
@@ -535,26 +702,17 @@ function proxyAnthropicStream(response: Response): Response {
                   controller.enqueue(encoder.encode('\n</thinking>\n\n'))
                   isInThinkingBlock = false
                 }
-              }
-              // Handle message_stop (end of stream)
-              else if (json.type === 'message_stop') {
-                // Close any open thinking block
+              } else if (json.type === 'message_stop') {
                 if (isInThinkingBlock) {
                   controller.enqueue(encoder.encode('\n</thinking>'))
                   isInThinkingBlock = false
                 }
+              } else if (json.type === 'error') {
+                controller.enqueue(encoder.encode(`\n[Error: ${json.error?.message || JSON.stringify(json.error)}]`))
               }
-              // Handle errors
-              else if (json.type === 'error') {
-                const errMsg = json.error?.message || JSON.stringify(json.error)
-                controller.enqueue(encoder.encode(`\n[Error: ${errMsg}]`))
-              }
-            } catch {
-              // Skip non-JSON lines or malformed data
-            }
+            } catch { /* skip */ }
           }
         }
-        // Ensure thinking block is closed at end of stream
         if (isInThinkingBlock) {
           try { controller.enqueue(encoder.encode('\n</thinking>')) } catch {}
         }
